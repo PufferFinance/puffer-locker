@@ -56,7 +56,7 @@ contract VotingEscrow is ERC20, ERC20Permit, ERC20Votes {
     mapping(address => uint256) public userPointEpoch;
     mapping(address => mapping(uint256 => int128)) internal _userSlopeChanges;
 
-    uint256 internal constant MULTIPLIER = 10**18;
+    uint256 internal constant MULTIPLIER = 1e18;
 
     // ------------------------ CONSTRUCTOR ------------------------
     constructor(IERC20 _puffer, uint256 _maxLockTime)
