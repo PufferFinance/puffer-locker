@@ -37,12 +37,14 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     event Deposit(address indexed provider, uint256 indexed lockId, uint256 value, uint256 locktime, uint256 vlTokenAmount, uint256 ts);
     event Withdraw(address indexed provider, uint256 indexed lockId, uint256 value, uint256 ts);
     event Supply(uint256 prevSupply, uint256 supply);
+    event DelegatedToPufferTeam(address indexed delegator);
 
     // ------------------------ STATE VARIABLES ------------------------
     IERC20 public immutable PUFFER;
     uint256 public immutable MAX_LOCK_TIME = 2 * 365 days; // 2 years
     uint256 public constant EPOCH_DURATION = 1 weeks;
     uint256 public lockedSupply;
+    address public immutable PUFFER_TEAM;
 
     // User address => lock ID => Lock details
     mapping(address => mapping(uint256 => Lock)) public userLocks;
@@ -52,11 +54,12 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     mapping(address => uint256) public userVlTokenBalance;
 
     // ------------------------ CONSTRUCTOR ------------------------
-    constructor(IERC20 _puffer)
+    constructor(IERC20 _puffer, address _pufferTeam)
         ERC20("vlPuffer", "vlPuffer")
         ERC20Permit("vlPuffer")
     {
         PUFFER = _puffer;
+        PUFFER_TEAM = _pufferTeam;
     }
 
     // ------------------------ MODIFIERS ------------------------
@@ -119,6 +122,12 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         
         // Mint vlTokens
         _mint(msg.sender, vlTokenAmount);
+
+        // If this is the first mint and the user hasn't delegated yet, 
+        // delegate to themselves by default
+        if (delegates(msg.sender) == address(0)) {
+            _delegate(msg.sender, msg.sender);
+        }
         
         // Transfer PUFFER tokens to this contract
         bool ok = PUFFER.transferFrom(msg.sender, address(this), _value);
@@ -159,7 +168,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         uint256 supplyBefore = lockedSupply;
         lockedSupply = supplyBefore - value;
         
-        // Burn vlTokens
+        // Burn vlTokens (this also updates voting power)
         _burn(msg.sender, vlTokenValue);
         
         // Transfer PUFFER tokens back to user
@@ -168,6 +177,36 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         
         emit Withdraw(msg.sender, _lockId, value, block.timestamp);
         emit Supply(supplyBefore, lockedSupply);
+    }
+
+    /**
+     * @notice Delegate voting power to a representative
+     * @param delegatee The address to delegate votes to
+     */
+    function delegate(address delegatee) public override {
+        super.delegate(delegatee);
+    }
+
+    /**
+     * @notice Delegate votes from signatory to a specific delegatee
+     */
+    function delegateBySig(
+        address delegatee,
+        uint256 nonce,
+        uint256 expiry,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public override {
+        super.delegateBySig(delegatee, nonce, expiry, v, r, s);
+    }
+
+    /**
+     * @notice Delegate voting power to the Puffer team
+     */
+    function delegateToPufferTeam() external {
+        delegate(PUFFER_TEAM);
+        emit DelegatedToPufferTeam(msg.sender);
     }
 
     /**
@@ -234,6 +273,13 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      */
     function balanceOf(address account) public view override returns (uint256) {
         return userVlTokenBalance[account];
+    }
+
+    /**
+     * @notice Returns the address delegated to by a specific account
+     */
+    function getDelegatee(address account) external view returns (address) {
+        return delegates(account);
     }
 
     // ------------------------ OVERRIDES REQUIRED BY SOLIDITY ------------------------

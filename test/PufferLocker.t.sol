@@ -14,6 +14,7 @@ contract PufferLockerTest is Test {
     address alice;
     address bob;
     address charlie;
+    address pufferTeam;
 
     // Contracts
     ERC20Mock public token;
@@ -27,9 +28,11 @@ contract PufferLockerTest is Test {
         alice = address(0x1);
         bob = address(0x2);
         charlie = address(0x3);
+        pufferTeam = address(0x4);
         vm.label(alice, "Alice");
         vm.label(bob, "Bob");
         vm.label(charlie, "Charlie");
+        vm.label(pufferTeam, "Puffer Team");
         
         // Mint tokens to users
         amount = 1000 * 10**18;
@@ -39,7 +42,7 @@ contract PufferLockerTest is Test {
         token.mint(charlie, amount * 10);
         
         // Setup PufferLocker
-        pufferLocker = new PufferLocker(token);
+        pufferLocker = new PufferLocker(token, pufferTeam);
         
         // Approve pufferLocker to spend tokens
         vm.startPrank(alice);
@@ -510,5 +513,112 @@ contract PufferLockerTest is Test {
         vm.expectRevert(PufferLocker.NoExistingLock.selector);
         pufferLocker.withdraw(lockId);
         vm.stopPrank();
+    }
+
+    function test_Delegation() public {
+        moveToWeekStart();
+        
+        // Alice creates a lock
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+        
+        // Check initial delegation - should be self-delegated by default now
+        address initialDelegatee = pufferLocker.getDelegatee(alice);
+        assertEq(initialDelegatee, alice);
+        
+        uint256 aliceInitialVotes = pufferLocker.getVotes(alice);
+        uint256 aliceBalance = pufferLocker.balanceOf(alice);
+        assertEq(aliceInitialVotes, aliceBalance);
+        
+        // Alice delegates to Bob
+        vm.startPrank(alice);
+        pufferLocker.delegate(bob);
+        vm.stopPrank();
+        
+        // Check delegation updated
+        assertEq(pufferLocker.getDelegatee(alice), bob);
+        
+        // Check voting power has been delegated
+        uint256 bobVotes = pufferLocker.getVotes(bob);
+        assertEq(bobVotes, aliceBalance);
+        assertEq(pufferLocker.getVotes(alice), 0); // Alice delegated her votes
+    }
+    
+    function test_DelegateToPufferTeam() public {
+        moveToWeekStart();
+        
+        // Alice creates a lock
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        
+        // Delegate to Puffer team
+        pufferLocker.delegateToPufferTeam();
+        vm.stopPrank();
+        
+        // Check delegation updated
+        assertEq(pufferLocker.getDelegatee(alice), pufferTeam);
+        
+        // Check voting power
+        uint256 aliceBalance = pufferLocker.balanceOf(alice);
+        uint256 teamVotes = pufferLocker.getVotes(pufferTeam);
+        assertEq(teamVotes, aliceBalance);
+    }
+    
+    function test_DelegationWithMultipleLocks() public {
+        moveToWeekStart();
+        
+        // Alice creates multiple locks
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        pufferLocker.createLock(amount / 2, block.timestamp + 8 weeks);
+        
+        // Delegate to Bob
+        pufferLocker.delegate(bob);
+        vm.stopPrank();
+        
+        // Check delegation
+        uint256 aliceBalance = pufferLocker.balanceOf(alice);
+        uint256 bobVotes = pufferLocker.getVotes(bob);
+        assertEq(bobVotes, aliceBalance);
+        
+        // Alice creates another lock - votes should go to Bob
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount / 4, block.timestamp + 12 weeks);
+        vm.stopPrank();
+        
+        // Recalculate expected votes
+        aliceBalance = pufferLocker.balanceOf(alice);
+        bobVotes = pufferLocker.getVotes(bob);
+        assertEq(bobVotes, aliceBalance);
+    }
+    
+    function test_WithdrawAfterDelegation() public {
+        moveToWeekStart();
+        
+        // Alice creates a lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        
+        // Delegate to Bob
+        pufferLocker.delegate(bob);
+        vm.stopPrank();
+        
+        // Check initial votes
+        uint256 aliceBalance = pufferLocker.balanceOf(alice);
+        uint256 bobVotes = pufferLocker.getVotes(bob);
+        assertEq(bobVotes, aliceBalance);
+        
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 6 weeks);
+        
+        // Alice withdraws
+        vm.startPrank(alice);
+        pufferLocker.withdraw(lockId);
+        vm.stopPrank();
+        
+        // Check votes after withdrawal
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.getVotes(bob), 0); // Bob should no longer have voting power
     }
 }
