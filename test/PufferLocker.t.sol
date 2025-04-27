@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test, console2} from "forge-std/Test.sol";
 import {PufferLocker} from "../src/PufferLocker.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 
 contract PufferLockerTest is Test {
     // Constants
-    uint256 constant H = 3600;
-    uint256 constant DAY = 86400;
-    uint256 constant WEEK = 7 * DAY;
-    uint256 constant MAXTIME = 4 * 365 * DAY; // 4 years in seconds
-    uint256 constant TOL = 120 * 1e18 / WEEK;
-    uint256 constant PRECISION = 1e18;
+    uint256 constant WEEK = 1 weeks;
+    uint256 constant MAX_LOCK_TIME = 2 * 365 days; // 2 years
 
     // Actors
     address alice;
@@ -26,16 +22,6 @@ contract PufferLockerTest is Test {
     // Amounts
     uint256 amount;
 
-    // Test stages
-    struct Stage {
-        uint256 blockNumber;
-        uint256 timestamp;
-    }
-    mapping(string => Stage) stages;
-    
-    // Store block numbers and timestamps individually instead of arrays
-    mapping(string => mapping(uint256 => Stage)) timeSeriesStages;
-
     function setUp() public {
         // Setup accounts
         alice = address(0x1);
@@ -45,56 +31,31 @@ contract PufferLockerTest is Test {
         vm.label(bob, "Bob");
         vm.label(charlie, "Charlie");
         
-        // Mint tokens to Alice and Bob
+        // Mint tokens to users
         amount = 1000 * 10**18;
         token = new ERC20Mock();
-        token.mint(alice, amount);
-        token.mint(bob, amount);
-        token.mint(charlie, amount);
+        token.mint(alice, amount * 10);
+        token.mint(bob, amount * 10);
+        token.mint(charlie, amount * 10);
         
         // Setup PufferLocker
-        pufferLocker = new PufferLocker(token, MAXTIME);
+        pufferLocker = new PufferLocker(token);
         
         // Approve pufferLocker to spend tokens
-        vm.startPrank(alice, alice);
-        token.approve(address(pufferLocker), amount * 10);
+        vm.startPrank(alice);
+        token.approve(address(pufferLocker), amount * 100);
         vm.stopPrank();
         
-        vm.startPrank(bob, bob);
-        token.approve(address(pufferLocker), amount * 10);
+        vm.startPrank(bob);
+        token.approve(address(pufferLocker), amount * 100);
         vm.stopPrank();
         
-        vm.startPrank(charlie, charlie);
-        token.approve(address(pufferLocker), amount * 10);
+        vm.startPrank(charlie);
+        token.approve(address(pufferLocker), amount * 100);
         vm.stopPrank();
     }
-    
-    // Helper function to check approximate equality
-    function assertApprox(uint256 a, uint256 b, uint256 tolerance) internal {
-        uint256 diff = a > b ? a - b : b - a;
-        if (diff > tolerance) {
-            emit log_named_uint("Error: approx a", a);
-            emit log_named_uint("Error: approx b", b);
-            emit log_named_uint("Error: diff", diff);
-            emit log_named_uint("Error: tolerance", tolerance);
-            emit log("Values not approximately equal");
-            fail();
-        }
-    }
-    
-    // Log important data for debugging
-    function logBalances(string memory label) internal {
-        uint256 alice_balance = pufferLocker.balanceOf(alice);
-        uint256 bob_balance = pufferLocker.balanceOf(bob);
-        uint256 total_supply = pufferLocker.totalSupply();
-        
-        emit log_string(string(abi.encodePacked("--- ", label, " ---")));
-        emit log_named_uint("Alice balance", alice_balance);
-        emit log_named_uint("Bob balance", bob_balance);
-        emit log_named_uint("Total supply", total_supply);
-    }
-    
-    // Move to the beginning of a week
+
+    // Helper function to move to beginning of a week
     function moveToWeekStart() internal {
         uint256 currentTime = block.timestamp;
         uint256 weekStart = (currentTime / WEEK + 1) * WEEK;
@@ -102,676 +63,452 @@ contract PufferLockerTest is Test {
         vm.roll(block.number + 1);
     }
 
-    function test_voting_powers() public {
-        // Initial checks
-        assertEq(pufferLocker.totalSupply(), 0);
-        assertEq(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-
-        // Move to beginning of a week
+    function test_CreateLock() public {
         moveToWeekStart();
-        vm.warp(block.timestamp + H);
         
-        // Save stage: before_deposits
-        stages["before_deposits"] = Stage(block.number, block.timestamp);
-        
-        // Alice creates lock
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
+        // Alice creates a 4-week lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
         vm.stopPrank();
         
-        // Save stage: alice_deposit
-        stages["alice_deposit"] = Stage(block.number, block.timestamp);
+        // Check lock ID
+        assertEq(lockId, 0);
         
-        // Advance time
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
+        // Check user's lock count
+        assertEq(pufferLocker.getLockCount(alice), 1);
         
-        // Detailed week-by-week test to verify voting power decay
-        uint256 t0 = block.timestamp;
+        // Get the lock
+        PufferLocker.Lock memory lock = pufferLocker.getLock(alice, lockId);
         
-        // Get current values to use for assertions
-        uint256 aliceBalance = pufferLocker.balanceOf(alice);
-        uint256 totalSupply = pufferLocker.totalSupply();
+        // Check lock details
+        assertEq(lock.amount, amount);
+        assertEq(lock.end, block.timestamp + 4 weeks);
+        assertEq(lock.vlTokenAmount, amount * 4); // 4 weeks = 4x multiplier
         
-        // Log initial values for debugging
-        emit log_named_uint("Initial Alice balance", aliceBalance);
-        emit log_named_uint("Initial total supply", totalSupply);
+        // Check vlPuffer balance
+        assertEq(pufferLocker.balanceOf(alice), amount * 4);
         
-        // Check that Alice has voting power
-        assertGt(aliceBalance, 0);
+        // Check total supply
+        assertEq(pufferLocker.totalSupply(), amount * 4);
         
-        // If total supply is tracking properly, it should equal Alice's balance
-        if (totalSupply > 0) {
-            assertEq(totalSupply, aliceBalance);
-        }
-        
-        // Check voting power decay over a week
-        for (uint256 i = 0; i < 7; i++) {
-            vm.warp(block.timestamp + DAY);
-            vm.roll(block.number + 1);
-            
-            uint256 dt = block.timestamp - t0;
-            uint256 newAliceBalance = pufferLocker.balanceOf(alice);
-            
-            // Alice's balance should decrease over time
-            assertLe(newAliceBalance, aliceBalance);
-            
-            // For full formula checking, we need to handle implementations where the formula might differ
-            uint256 expectedBalance;
-            if (WEEK > 2 * H + dt) {
-                expectedBalance = amount * (WEEK - 2 * H - dt) / MAXTIME;
-            } else {
-                expectedBalance = 0;
-            }
-            
-            // Log values for debugging
-            emit log_named_uint("Day", i + 1);
-            emit log_named_uint("Actual Alice balance", newAliceBalance);
-            emit log_named_uint("Expected Alice balance", expectedBalance);
-            
-            // Update Alice's balance for next iteration
-            aliceBalance = newAliceBalance;
-        }
+        // Check locked supply
+        assertEq(pufferLocker.totalLockedSupply(), amount);
+    }
 
-        // Let the lock expire
-        vm.warp(block.timestamp + WEEK);
+    function test_MultipleLocks() public {
+        moveToWeekStart();
         
-        // Alice withdraws
-        vm.startPrank(alice, alice);
-        pufferLocker.withdraw();
+        // Alice creates multiple locks with different durations
+        vm.startPrank(alice);
+        uint256 lockId1 = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        uint256 lockId2 = pufferLocker.createLock(amount / 2, block.timestamp + 8 weeks);
+        uint256 lockId3 = pufferLocker.createLock(amount / 4, block.timestamp + 12 weeks);
+        vm.stopPrank();
+        
+        // Check lock IDs
+        assertEq(lockId1, 0);
+        assertEq(lockId2, 1);
+        assertEq(lockId3, 2);
+        
+        // Check user's lock count
+        assertEq(pufferLocker.getLockCount(alice), 3);
+        
+        // Check lock details
+        PufferLocker.Lock memory lock1 = pufferLocker.getLock(alice, lockId1);
+        PufferLocker.Lock memory lock2 = pufferLocker.getLock(alice, lockId2);
+        PufferLocker.Lock memory lock3 = pufferLocker.getLock(alice, lockId3);
+        
+        assertEq(lock1.amount, amount);
+        assertEq(lock1.end, block.timestamp + 4 weeks);
+        assertEq(lock1.vlTokenAmount, amount * 4);
+        
+        assertEq(lock2.amount, amount / 2);
+        assertEq(lock2.end, block.timestamp + 8 weeks);
+        assertEq(lock2.vlTokenAmount, (amount / 2) * 8);
+        
+        assertEq(lock3.amount, amount / 4);
+        assertEq(lock3.end, block.timestamp + 12 weeks);
+        assertEq(lock3.vlTokenAmount, (amount / 4) * 12);
+        
+        // Check total vlPuffer balance
+        uint256 expectedBalance = amount * 4 + (amount / 2) * 8 + (amount / 4) * 12;
+        assertEq(pufferLocker.balanceOf(alice), expectedBalance);
+        
+        // Check locked token amount
+        uint256 expectedLockedAmount = amount + (amount / 2) + (amount / 4);
+        assertEq(pufferLocker.totalLockedSupply(), expectedLockedAmount);
+    }
+
+    function test_WithdrawExpiredLock() public {
+        moveToWeekStart();
+        
+        // Alice creates a 4-week lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+        
+        // Check initial balance
+        assertEq(pufferLocker.balanceOf(alice), amount * 4);
+        assertEq(token.balanceOf(alice), amount * 10 - amount);
+        
+        // Try to withdraw before expiry
+        vm.startPrank(alice);
+        vm.expectRevert(PufferLocker.LockNotExpired.selector);
+        pufferLocker.withdraw(lockId);
+        vm.stopPrank();
+        
+        // Move time forward to after lock expiry
+        vm.warp(block.timestamp + 4 weeks + 1);
+        
+        // Withdraw
+        vm.startPrank(alice);
+        pufferLocker.withdraw(lockId);
         vm.stopPrank();
         
         // Check balances after withdrawal
         assertEq(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
+        assertEq(token.balanceOf(alice), amount * 10);
         
-        // Move to next week
-        moveToWeekStart();
-        
-        // Alice creates a 2-week lock
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + 2 * WEEK);
-        vm.stopPrank();
-        
-        // Bob creates a 1-week lock
-        vm.startPrank(bob, bob);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
-        vm.stopPrank();
-        
-        // Check that both Alice and Bob have voting power
-        assertGt(pufferLocker.balanceOf(alice), 0);
-        assertGt(pufferLocker.balanceOf(bob), 0);
-        
-        // Let Bob's lock expire
-        vm.warp(block.timestamp + WEEK + H);
-        
-        // Bob withdraws
-        vm.startPrank(bob, bob);
-        pufferLocker.withdraw();
-        vm.stopPrank();
-        
-        // Check that only Alice has voting power
-        assertGt(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-        
-        // Let Alice's lock expire
-        vm.warp(block.timestamp + WEEK);
-        
-        // Alice withdraws
-        vm.startPrank(alice, alice);
-        pufferLocker.withdraw();
-        vm.stopPrank();
-        
-        // Final balance checks
-        assertEq(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-    }
-    
-    function test_depositFor() public {
-        // Setup: create an initial lock for Charlie
-        moveToWeekStart();
-        
-        vm.startPrank(charlie, charlie);
-        pufferLocker.createLock(amount / 10, block.timestamp + WEEK);
-        vm.stopPrank();
-        
-        uint256 initialBalance = pufferLocker.balanceOf(charlie);
-        
-        // Alice deposits on behalf of Charlie
-        vm.startPrank(alice, alice);
-        pufferLocker.depositFor(charlie, amount / 5);
-        vm.stopPrank();
-        
-        // Check Charlie's balance increased
-        uint256 newBalance = pufferLocker.balanceOf(charlie);
-        assertGt(newBalance, initialBalance);
-        
-        // The lock duration remains the same
-        assertApprox(
-            newBalance,
-            initialBalance + (amount / 5) * WEEK / MAXTIME,
-            TOL
-        );
+        // Check lock was reset
+        PufferLocker.Lock memory lock = pufferLocker.getLock(alice, lockId);
+        assertEq(lock.amount, 0);
+        assertEq(lock.end, 0);
+        assertEq(lock.vlTokenAmount, 0);
     }
 
-    function test_increaseAmount() public {
-        // Setup: create an initial lock for Alice
+    function test_WithdrawMultipleExpiredLocks() public {
         moveToWeekStart();
         
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount / 2, block.timestamp + 2 * WEEK);
+        // Alice creates multiple locks with different durations
+        vm.startPrank(alice);
+        uint256 lockId1 = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        uint256 lockId2 = pufferLocker.createLock(amount / 2, block.timestamp + 8 weeks);
+        uint256 lockId3 = pufferLocker.createLock(amount / 4, block.timestamp + 12 weeks);
         vm.stopPrank();
         
-        uint256 initialBalance = pufferLocker.balanceOf(alice);
+        // Move time forward past the first lock expiry
+        vm.warp(block.timestamp + 6 weeks);
         
-        // Alice increases her locked amount
-        vm.startPrank(alice, alice);
-        pufferLocker.increaseAmount(amount / 4);
+        // Get expired locks
+        uint256[] memory expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 1);
+        assertEq(expiredLocks[0], lockId1);
+        
+        // Withdraw the first expired lock
+        vm.startPrank(alice);
+        pufferLocker.withdraw(lockId1);
         vm.stopPrank();
         
-        // Check her balance increased
-        uint256 newBalance = pufferLocker.balanceOf(alice);
-        assertGt(newBalance, initialBalance);
+        // Check balances after first withdrawal
+        uint256 expectedBalance = (amount / 2) * 8 + (amount / 4) * 12;
+        assertEq(pufferLocker.balanceOf(alice), expectedBalance);
+        assertEq(token.balanceOf(alice), amount * 10 - amount / 2 - amount / 4);
         
-        // The increased amount should reflect in voting power
-        assertApprox(
-            newBalance,
-            (amount / 2 + amount / 4) * 2 * WEEK / MAXTIME,
-            TOL
-        );
+        // Move time forward past the second lock expiry
+        vm.warp(block.timestamp + 3 weeks);
+        
+        // Get expired locks
+        expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 1);
+        assertEq(expiredLocks[0], lockId2);
+        
+        // Withdraw the second expired lock
+        vm.startPrank(alice);
+        pufferLocker.withdraw(lockId2);
+        vm.stopPrank();
+        
+        // Check balances after second withdrawal
+        expectedBalance = (amount / 4) * 12;
+        assertEq(pufferLocker.balanceOf(alice), expectedBalance);
+        assertEq(token.balanceOf(alice), amount * 10 - amount / 4);
+        
+        // Move time forward past the third lock expiry
+        vm.warp(block.timestamp + 4 weeks);
+        
+        // Get expired locks
+        expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 1);
+        assertEq(expiredLocks[0], lockId3);
+        
+        // Withdraw the third expired lock
+        vm.startPrank(alice);
+        pufferLocker.withdraw(lockId3);
+        vm.stopPrank();
+        
+        // Check balances after third withdrawal
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(token.balanceOf(alice), amount * 10);
     }
-    
-    function test_increaseUnlockTime() public {
-        // Setup: create an initial lock for Alice
+
+    function test_InvalidLockId() public {
         moveToWeekStart();
         
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
+        // Try to get a lock with invalid ID
+        vm.expectRevert(PufferLocker.InvalidLockId.selector);
+        pufferLocker.getLock(alice, 0);
+        
+        // Try to withdraw a lock with invalid ID
+        vm.startPrank(alice);
+        vm.expectRevert(PufferLocker.InvalidLockId.selector);
+        pufferLocker.withdraw(0);
         vm.stopPrank();
         
-        uint256 initialBalance = pufferLocker.balanceOf(alice);
-        
-        // Alice extends her lock to 2 weeks
-        vm.startPrank(alice, alice);
-        pufferLocker.increaseUnlockTime(block.timestamp + 2 * WEEK);
+        // Create a lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
         vm.stopPrank();
         
-        // Check her balance increased due to longer lock
-        uint256 newBalance = pufferLocker.balanceOf(alice);
-        assertGt(newBalance, initialBalance);
-        
-        // The extended lock time should reflect in voting power
-        assertApprox(
-            newBalance,
-            amount * 2 * WEEK / MAXTIME,
-            TOL
-        );
+        // Try to get a lock with an ID that's too high
+        vm.expectRevert(PufferLocker.InvalidLockId.selector);
+        pufferLocker.getLock(alice, lockId + 1);
     }
-    
-    function test_revertConditions() public {
+
+    function test_ZeroValue() public {
         moveToWeekStart();
         
-        // Test zero value deposit
-        vm.startPrank(alice, alice);
+        // Try to create a lock with zero value
+        vm.startPrank(alice);
         vm.expectRevert(PufferLocker.ZeroValue.selector);
-        pufferLocker.createLock(0, block.timestamp + WEEK);
+        pufferLocker.createLock(0, block.timestamp + 4 weeks);
+        vm.stopPrank();
+    }
+
+    function test_MaxLockTime() public {
+        moveToWeekStart();
+        
+        // Try to create a lock with too long lock time
+        vm.startPrank(alice);
+        vm.expectRevert(PufferLocker.ExceedsMaxLockTime.selector);
+        pufferLocker.createLock(amount, block.timestamp + MAX_LOCK_TIME + 1 weeks);
         vm.stopPrank();
         
-        // Test creating lock with time in the past
-        vm.startPrank(alice, alice);
+        // Create a lock with exactly the max time
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + MAX_LOCK_TIME);
+        vm.stopPrank();
+        
+        // Get the lock
+        PufferLocker.Lock memory lock = pufferLocker.getLock(alice, lockId);
+        
+        // Calculate expected values
+        uint256 endTime = (block.timestamp + MAX_LOCK_TIME) / WEEK * WEEK; // Align to weeks
+        uint256 numWeeks = (endTime - block.timestamp) / WEEK;
+        
+        // Check lock details
+        assertEq(lock.amount, amount);
+        assertEq(lock.end, endTime);
+        assertEq(lock.vlTokenAmount, amount * numWeeks);
+    }
+
+    function test_PastLockTime() public {
+        moveToWeekStart();
+        
+        // Try to create a lock with past unlock time
+        vm.startPrank(alice);
         vm.expectRevert(PufferLocker.FutureLockTimeRequired.selector);
         pufferLocker.createLock(amount, block.timestamp - 1);
         vm.stopPrank();
         
-        // Test creating lock with time too far in the future
-        vm.startPrank(alice, alice);
-        vm.expectRevert(PufferLocker.ExceedsMaxLockTime.selector);
-        pufferLocker.createLock(amount, block.timestamp + MAXTIME + WEEK);
-        vm.stopPrank();
-        
-        // Test depositFor with no existing lock
-        vm.startPrank(alice, alice);
-        vm.expectRevert(PufferLocker.NoExistingLock.selector);
-        pufferLocker.depositFor(bob, amount);
-        vm.stopPrank();
-        
-        // Create a valid lock for further tests
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
-        vm.stopPrank();
-        
-        // Test creating a second lock when one already exists
-        vm.startPrank(alice, alice);
-        vm.expectRevert(PufferLocker.LockAlreadyExists.selector);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
-        vm.stopPrank();
-        
-        // Test withdrawing before lock expiry
-        vm.startPrank(alice, alice);
-        vm.expectRevert(PufferLocker.LockNotExpired.selector);
-        pufferLocker.withdraw();
-        vm.stopPrank();
-        
-        // Test extension that doesn't go beyond current lock
-        vm.startPrank(alice, alice);
+        // Try to create a lock with current unlock time
+        vm.startPrank(alice);
         vm.expectRevert(PufferLocker.FutureLockTimeRequired.selector);
-        pufferLocker.increaseUnlockTime(block.timestamp - 1);
-        vm.stopPrank();
-        
-        // Let the lock expire
-        vm.warp(block.timestamp + WEEK + 1);
-        
-        // Test depositFor with expired lock
-        vm.startPrank(bob, bob);
-        vm.expectRevert(PufferLocker.LockExpired.selector);
-        pufferLocker.depositFor(alice, amount);
-        vm.stopPrank();
-        
-        // Test increaseAmount with expired lock
-        vm.startPrank(alice, alice);
-        vm.expectRevert(PufferLocker.LockExpired.selector);
-        pufferLocker.increaseAmount(amount);
+        pufferLocker.createLock(amount, block.timestamp);
         vm.stopPrank();
     }
-    
-    function test_nonTransferable() public {
-        // Create a lock for Alice
+
+    function test_MultipleUsers() public {
         moveToWeekStart();
         
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
+        // Alice creates a 4-week lock
+        vm.startPrank(alice);
+        uint256 aliceLockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
         vm.stopPrank();
         
-        // Make sure Alice has voting power (tokens)
-        uint256 votingPower = pufferLocker.balanceOf(alice);
-        assertGt(votingPower, 0);
-        
-        // Attempt transfer which should revert 
-        vm.startPrank(alice, alice);
-        vm.expectRevert();
-        pufferLocker.transfer(bob, votingPower);
+        // Bob creates an 8-week lock
+        vm.startPrank(bob);
+        uint256 bobLockId = pufferLocker.createLock(amount, block.timestamp + 8 weeks);
         vm.stopPrank();
         
-        // Ensure balances are intact
-        assertGt(pufferLocker.balanceOf(alice), 0);
+        // Charlie creates a 12-week lock
+        vm.startPrank(charlie);
+        pufferLocker.createLock(amount, block.timestamp + 12 weeks);
+        vm.stopPrank();
+        
+        // Check balances
+        assertEq(pufferLocker.balanceOf(alice), amount * 4);
+        assertEq(pufferLocker.balanceOf(bob), amount * 8);
+        assertEq(pufferLocker.balanceOf(charlie), amount * 12);
+        
+        // Move time forward past Alice's lock expiry
+        vm.warp(block.timestamp + 6 weeks);
+        
+        // Alice withdraws
+        vm.startPrank(alice);
+        pufferLocker.withdraw(aliceLockId);
+        vm.stopPrank();
+        
+        // Check balances after Alice's withdrawal
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.balanceOf(bob), amount * 8);
+        assertEq(pufferLocker.balanceOf(charlie), amount * 12);
+        
+        // Move time forward past Bob's lock expiry
+        vm.warp(block.timestamp + 4 weeks);
+        
+        // Bob withdraws
+        vm.startPrank(bob);
+        pufferLocker.withdraw(bobLockId);
+        vm.stopPrank();
+        
+        // Check balances after Bob's withdrawal
+        assertEq(pufferLocker.balanceOf(alice), 0);
         assertEq(pufferLocker.balanceOf(bob), 0);
+        assertEq(pufferLocker.balanceOf(charlie), amount * 12);
     }
 
-    // Test of voting power dynamics with multiple users
-    function test_detailed_voting_powers() public {
-        // Initial checks
-        assertEq(pufferLocker.totalSupply(), 0);
-        assertEq(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-
-        // Mint additional tokens for Alice to avoid balance issues after transfer
-        token.mint(alice, amount);
-        
-        // Transfer tokens to Bob from Alice (like in the Python test)
-        vm.prank(alice, alice);
-        token.transfer(bob, amount);
-
-        // Move to beginning of a week
+    function test_TransfersDisabled() public {
         moveToWeekStart();
         
-        // Save stage: before_deposits
-        stages["before_deposits"] = Stage(block.number, block.timestamp);
-        
-        vm.warp(block.timestamp + H);
-        
-        // Alice creates lock
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
+        // Alice creates a lock
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
         vm.stopPrank();
         
-        logBalances("After Alice's lock creation");
-        
-        // Save stage: alice_deposit
-        stages["alice_deposit"] = Stage(block.number, block.timestamp);
-        
-        // Advance time
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
-        
-        logBalances("After advancing time");
-        
-        // Get current voting power values from the contract
-        uint256 total_supply = pufferLocker.totalSupply();
-        uint256 alice_balance = pufferLocker.balanceOf(alice);
-        
-        // Check that values are reasonable 
-        if (total_supply > 0) {
-            assertEq(total_supply, alice_balance);
-        }
-        
-        // Alice should have voting power
-        assertGt(alice_balance, 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-        
-        uint256 t0 = block.timestamp;
-        timeSeriesStages["alice_in_0"][0] = Stage(block.number, block.timestamp);
-        
-        // Track voting power over time for a week (hourly increments merged to daily checks)
-        for (uint256 i = 0; i < 7; i++) {
-            vm.warp(block.timestamp + DAY);
-            vm.roll(block.number + 24);
-            
-            // Get current values from contract
-            uint256 loop_alice_power = pufferLocker.balanceOf(alice);
-            
-            // Check that values are reasonable
-            assertLe(loop_alice_power, alice_balance, "Alice's voting power should decrease over time");
-            assertEq(pufferLocker.balanceOf(bob), 0);
-            
-            // Update our tracking variables
-            alice_balance = loop_alice_power;
-            
-            timeSeriesStages["alice_in_0"][i+1] = Stage(block.number, block.timestamp);
-        }
-        
-        vm.warp(block.timestamp + H);
-        
-        // Verify voting power is zero and withdraw
-        assertEq(pufferLocker.balanceOf(alice), 0);
-        vm.startPrank(alice, alice);
-        pufferLocker.withdraw();
+        // Try to transfer vlPuffer tokens
+        vm.startPrank(alice);
+        vm.expectRevert(PufferLocker.TransfersDisabled.selector);
+        pufferLocker.transfer(bob, amount);
         vm.stopPrank();
         
-        stages["alice_withdraw"] = Stage(block.number, block.timestamp);
-        
-        // Verify zero balances after withdrawal
-        assertEq(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-        
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
-        
-        // Move to next week
-        moveToWeekStart();
-        
-        // Alice creates a 2-week lock
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + 2 * WEEK);
+        // Try to approve and transferFrom
+        vm.startPrank(alice);
+        pufferLocker.approve(bob, amount);
         vm.stopPrank();
         
-        logBalances("After Alice's second lock creation");
-        
-        stages["alice_deposit_2"] = Stage(block.number, block.timestamp);
-        
-        // Get initial values
-        alice_balance = pufferLocker.balanceOf(alice);
-        
-        // Verify that Alice has voting power
-        assertGt(alice_balance, 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-        
-        // Bob creates a 1-week lock
-        vm.startPrank(bob, bob);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
+        vm.startPrank(bob);
+        vm.expectRevert(PufferLocker.TransfersDisabled.selector);
+        pufferLocker.transferFrom(alice, bob, amount);
         vm.stopPrank();
-        
-        logBalances("After Bob's lock creation");
-        
-        stages["bob_deposit_2"] = Stage(block.number, block.timestamp);
-        
-        // Get updated values after Bob's deposit
-        uint256 bob_balance = pufferLocker.balanceOf(bob);
-        
-        // Verify Bob has voting power
-        assertGt(bob_balance, 0, "Bob should have voting power");
-        
-        t0 = block.timestamp;
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
-        
-        // Track voting power over time for a week with both locks
-        for (uint256 i = 0; i < 7; i++) {
-            vm.warp(block.timestamp + DAY);
-            vm.roll(block.number + 24);
-            
-            // Get current values
-            uint256 loop_alice_power = pufferLocker.balanceOf(alice);
-            uint256 loop_bob_power = pufferLocker.balanceOf(bob);
-            
-            // Voting power should decrease over time
-            assertLe(loop_alice_power, alice_balance);
-            assertLe(loop_bob_power, bob_balance);
-            
-            // Alice's power should be greater than Bob's (longer lock)
-            if (loop_bob_power > 0) {
-                assertGt(loop_alice_power, loop_bob_power);
-            }
-            
-            // Update tracking variables
-            alice_balance = loop_alice_power;
-            bob_balance = loop_bob_power;
-            
-            timeSeriesStages["alice_bob_in_2"][i] = Stage(block.number, block.timestamp);
-        }
-        
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
-        
-        // Bob's lock should have expired, withdraw Bob's tokens
-        vm.startPrank(bob, bob);
-        pufferLocker.withdraw();
-        vm.stopPrank();
-        
-        t0 = block.timestamp;
-        stages["bob_withdraw_1"] = Stage(block.number, block.timestamp);
-        
-        // Verify only Alice has voting power now
-        uint256 current_alice = pufferLocker.balanceOf(alice);
-        assertGt(current_alice, 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
-        
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
-        
-        // Track Alice's voting power over the next week
-        alice_balance = current_alice;
-        
-        for (uint256 i = 0; i < 7; i++) {
-            vm.warp(block.timestamp + DAY);
-            vm.roll(block.number + 24);
-            
-            // Get current values
-            uint256 loop_alice_power = pufferLocker.balanceOf(alice);
-            
-            // Voting power should decrease over time
-            assertLe(loop_alice_power, alice_balance);
-            
-            // Bob should have no voting power
-            assertEq(pufferLocker.balanceOf(bob), 0);
-            
-            // Update tracking variables
-            alice_balance = loop_alice_power;
-            
-            timeSeriesStages["alice_in_2"][i] = Stage(block.number, block.timestamp);
-        }
-        
-        // Alice withdraws once her lock expires
-        vm.startPrank(alice, alice);
-        pufferLocker.withdraw();
-        vm.stopPrank();
-        
-        stages["alice_withdraw_2"] = Stage(block.number, block.timestamp);
-        
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
-        
-        // Verify both users have withdrawn
-        vm.startPrank(bob, bob);
-        pufferLocker.withdraw();
-        vm.stopPrank();
-        
-        stages["bob_withdraw_2"] = Stage(block.number, block.timestamp);
-        
-        assertEq(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.balanceOf(bob), 0);
     }
-    
-    // Test historical voting power queries
-    function test_historical_voting_power() public {
-        // Mint additional tokens for Alice to avoid balance issues after transfer
-        token.mint(alice, amount);
+
+    function test_LockAlignment() public {
+        // Set time to middle of a week
+        uint256 weekStart = (block.timestamp / WEEK) * WEEK;
+        vm.warp(weekStart + WEEK / 2);
         
-        // Setup scenario similar to test_detailed_voting_powers
-        vm.prank(alice, alice);
-        token.transfer(bob, amount);
+        // Alice creates a lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
         
-        // Move to beginning of a week
+        // Check that the end time is aligned to a week boundary
+        PufferLocker.Lock memory lock = pufferLocker.getLock(alice, lockId);
+        assertEq(lock.end % WEEK, 0);
+    }
+
+    function test_GetAllLocks() public {
         moveToWeekStart();
-        stages["before_deposits"] = Stage(block.number, block.timestamp);
         
-        vm.warp(block.timestamp + H);
-        
-        // Alice creates lock
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
+        // Alice creates multiple locks
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        pufferLocker.createLock(amount / 2, block.timestamp + 8 weeks);
+        pufferLocker.createLock(amount / 4, block.timestamp + 12 weeks);
         vm.stopPrank();
-        stages["alice_deposit"] = Stage(block.number, block.timestamp);
         
-        // Advance time
-        vm.warp(block.timestamp + H);
-        vm.roll(block.number + 1);
-        timeSeriesStages["alice_in_0"][0] = Stage(block.number, block.timestamp);
+        // Get all locks
+        PufferLocker.Lock[] memory locks = pufferLocker.getAllLocks(alice);
         
-        // Track voting power over time for a week
-        for (uint256 i = 0; i < 7; i++) {
-            vm.warp(block.timestamp + DAY);
-            vm.roll(block.number + 24);
-            timeSeriesStages["alice_in_0"][i+1] = Stage(block.number, block.timestamp);
-        }
+        // Check number of locks
+        assertEq(locks.length, 3);
         
-        vm.warp(block.timestamp + H);
-        vm.startPrank(alice, alice);
-        pufferLocker.withdraw();
-        vm.stopPrank();
-        stages["alice_withdraw"] = Stage(block.number, block.timestamp);
+        // Check each lock's details
+        assertEq(locks[0].amount, amount);
+        assertEq(locks[0].end, block.timestamp + 4 weeks);
+        assertEq(locks[0].vlTokenAmount, amount * 4);
         
-        // Second scenario with both Alice and Bob
+        assertEq(locks[1].amount, amount / 2);
+        assertEq(locks[1].end, block.timestamp + 8 weeks);
+        assertEq(locks[1].vlTokenAmount, (amount / 2) * 8);
+        
+        assertEq(locks[2].amount, amount / 4);
+        assertEq(locks[2].end, block.timestamp + 12 weeks);
+        assertEq(locks[2].vlTokenAmount, (amount / 4) * 12);
+    }
+
+    function test_getExpiredLocks() public {
         moveToWeekStart();
-        vm.startPrank(alice, alice);
-        pufferLocker.createLock(amount, block.timestamp + 2 * WEEK);
+        
+        // Alice creates multiple locks with different durations
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        pufferLocker.createLock(amount / 2, block.timestamp + 8 weeks);
+        pufferLocker.createLock(amount / 4, block.timestamp + 12 weeks);
         vm.stopPrank();
-        stages["alice_deposit_2"] = Stage(block.number, block.timestamp);
         
-        vm.startPrank(bob, bob);
-        pufferLocker.createLock(amount, block.timestamp + WEEK);
+        // Initially no locks should be expired
+        uint256[] memory expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 0);
+        
+        // Move time forward past the first lock expiry
+        vm.warp(block.timestamp + 6 weeks);
+        
+        // Check expired locks
+        expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 1);
+        assertEq(expiredLocks[0], 0);
+        
+        // Move time forward past the second lock expiry
+        vm.warp(block.timestamp + 4 weeks);
+        
+        // Check expired locks
+        expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 2);
+        assertEq(expiredLocks[0], 0);
+        assertEq(expiredLocks[1], 1);
+        
+        // Move time forward past the third lock expiry
+        vm.warp(block.timestamp + 4 weeks);
+        
+        // Check expired locks
+        expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 3);
+        assertEq(expiredLocks[0], 0);
+        assertEq(expiredLocks[1], 1);
+        assertEq(expiredLocks[2], 2);
+        
+        // Withdraw one lock
+        vm.startPrank(alice);
+        pufferLocker.withdraw(1);
         vm.stopPrank();
-        stages["bob_deposit_2"] = Stage(block.number, block.timestamp);
         
-        // Now test historical balanceOfAt and totalSupplyAtBlock
+        // Check expired locks after withdrawal
+        expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 2);
+        assertEq(expiredLocks[0], 0);
+        assertEq(expiredLocks[1], 2);
+    }
+
+    function test_NoExistingLock() public {
+        moveToWeekStart();
         
-        // Check before any deposits
-        uint256 beforeDeposit_alice = pufferLocker.balanceOfAt(alice, stages["before_deposits"].blockNumber);
-        uint256 beforeDeposit_bob = pufferLocker.balanceOfAt(bob, stages["before_deposits"].blockNumber);
-        uint256 beforeDeposit_total = pufferLocker.totalSupplyAtBlock(stages["before_deposits"].blockNumber);
+        // Alice creates a lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
         
-        // Initially check for balances before deposits
-        emit log_string("Before deposits:");
-        emit log_named_uint("Alice balance at block", beforeDeposit_alice);
-        emit log_named_uint("Total supply at block", beforeDeposit_total);
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 6 weeks);
         
-        // Verify user balances before deposits
-        if (beforeDeposit_alice > 0) {
-            // Verify Bob has no balance when Alice does
-            assertEq(beforeDeposit_bob, 0);
-        } else {
-            // Verify both users have zero balance
-            assertEq(beforeDeposit_alice, 0);
-            assertEq(beforeDeposit_bob, 0);
-        }
+        // Withdraw the lock
+        vm.startPrank(alice);
+        pufferLocker.withdraw(lockId);
+        vm.stopPrank();
         
-        // Check at Alice's first deposit
-        uint256 aliceDeposit_alice = pufferLocker.balanceOfAt(alice, stages["alice_deposit"].blockNumber);
-        uint256 aliceDeposit_bob = pufferLocker.balanceOfAt(bob, stages["alice_deposit"].blockNumber);
-        uint256 aliceDeposit_total = pufferLocker.totalSupplyAtBlock(stages["alice_deposit"].blockNumber);
-        
-        emit log_string("Alice's deposit:");
-        emit log_named_uint("Alice balance at block", aliceDeposit_alice);
-        emit log_named_uint("Bob balance at block", aliceDeposit_bob);
-        emit log_named_uint("Total supply at block", aliceDeposit_total);
-        
-        // Bob should have no voting power at this point
-        assertEq(aliceDeposit_bob, 0);
-        
-        // Check at various points during Alice's lock - we're ensuring voting power behaves as expected
-        bool previousIsGreaterThanCurrent = false;
-        uint256 previous_alice = 0;
-        
-        for (uint256 i = 0; i < 8; i++) {
-            Stage memory stage = timeSeriesStages["alice_in_0"][i];
-            uint256 timeSeries_alice = pufferLocker.balanceOfAt(alice, stage.blockNumber);
-            uint256 timeSeries_bob = pufferLocker.balanceOfAt(bob, stage.blockNumber);
-            uint256 timeSeries_total = pufferLocker.totalSupplyAtBlock(stage.blockNumber);
-            
-            emit log_string(string(abi.encodePacked("Time series ", vm.toString(i), ":")));
-            emit log_named_uint("Alice balance at block", timeSeries_alice);
-            emit log_named_uint("Total supply at block", timeSeries_total);
-            
-            // Bob should have no voting power
-            assertEq(timeSeries_bob, 0);
-            
-            // For points after the first one, check that voting power doesn't increase
-            if (i > 0 && previous_alice > 0 && timeSeries_alice > 0) {
-                if (previous_alice > timeSeries_alice) {
-                    previousIsGreaterThanCurrent = true;
-                }
-            }
-            
-            // Remember Alice's balance for next iteration
-            previous_alice = timeSeries_alice;
-        }
-        
-        // At least one time voting power should have decreased (but may not always be true due to checkpoint timing)
-        if (previousIsGreaterThanCurrent) {
-            assertTrue(previousIsGreaterThanCurrent, "Voting power should decrease over time at least once");
-        }
-        
-        // Check after Alice's withdrawal
-        uint256 aliceWithdraw_alice = pufferLocker.balanceOfAt(alice, stages["alice_withdraw"].blockNumber);
-        uint256 aliceWithdraw_bob = pufferLocker.balanceOfAt(bob, stages["alice_withdraw"].blockNumber);
-        uint256 aliceWithdraw_total = pufferLocker.totalSupplyAtBlock(stages["alice_withdraw"].blockNumber);
-        
-        emit log_string("After Alice withdrawal:");
-        emit log_named_uint("Alice balance at block", aliceWithdraw_alice);
-        emit log_named_uint("Total supply at block", aliceWithdraw_total);
-        
-        // After withdrawal, Bob should have no voting power
-        assertEq(aliceWithdraw_bob, 0);
-        
-        // Check at Alice's second deposit
-        uint256 aliceDeposit2_alice = pufferLocker.balanceOfAt(alice, stages["alice_deposit_2"].blockNumber);
-        uint256 aliceDeposit2_bob = pufferLocker.balanceOfAt(bob, stages["alice_deposit_2"].blockNumber);
-        uint256 aliceDeposit2_total = pufferLocker.totalSupplyAtBlock(stages["alice_deposit_2"].blockNumber);
-        
-        emit log_string("Alice's second deposit:");
-        emit log_named_uint("Alice balance at block", aliceDeposit2_alice);
-        emit log_named_uint("Bob balance at block", aliceDeposit2_bob);
-        emit log_named_uint("Total supply at block", aliceDeposit2_total);
-        
-        // Check if Bob has voting power at Alice's deposit
-        if (aliceDeposit2_bob == 0) { 
-            // Assert Bob has no balance at this point
-            assertEq(aliceDeposit2_bob, 0);
-        }
-        
-        // Check at Bob's deposit
-        uint256 bobDeposit2_alice = pufferLocker.balanceOfAt(alice, stages["bob_deposit_2"].blockNumber);
-        uint256 bobDeposit2_bob = pufferLocker.balanceOfAt(bob, stages["bob_deposit_2"].blockNumber);
-        uint256 bobDeposit2_total = pufferLocker.totalSupplyAtBlock(stages["bob_deposit_2"].blockNumber);
-        
-        emit log_string("Bob's deposit:");
-        emit log_named_uint("Alice balance at block", bobDeposit2_alice);
-        emit log_named_uint("Bob balance at block", bobDeposit2_bob);
-        emit log_named_uint("Total supply at block", bobDeposit2_total);
-        
-        // Verify Alice's voting power is greater than Bob's when both have locks
-        if (bobDeposit2_bob > 0 && bobDeposit2_alice > 0) {
-            assertGt(bobDeposit2_alice, bobDeposit2_bob);
-        }
+        // Try to withdraw again
+        vm.startPrank(alice);
+        vm.expectRevert(PufferLocker.NoExistingLock.selector);
+        pufferLocker.withdraw(lockId);
+        vm.stopPrank();
     }
 }
