@@ -8,11 +8,11 @@ import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Vo
 import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 
 /**
- * @title VotingEscrow
+ * @title PufferLocker
  * @notice Lock-based ERC20 token that grants voting power according to lock duration, 
  *         compatible with OpenZeppelin ERC20Votes.
  */
-contract VotingEscrow is ERC20, ERC20Permit, ERC20Votes {
+contract PufferLocker is ERC20, ERC20Permit, ERC20Votes {
     // ------------------------ ERRORS ------------------------
     error NotEOA();
     error ZeroValue();
@@ -70,6 +70,7 @@ contract VotingEscrow is ERC20, ERC20Permit, ERC20Votes {
     // ------------------------ MODIFIERS ------------------------
     modifier onlyEOA() {
         if (msg.sender != tx.origin) revert NotEOA();
+        if (msg.sender.code.length > 0) revert NotEOA();
         _;
     }
 
