@@ -88,8 +88,11 @@ contract PufferLockerTest is Test {
         assertEq(lock.end, block.timestamp + 4 weeks);
         assertEq(lock.vlTokenAmount, amount * 4); // 4 weeks = 4x multiplier
         
-        // Check vlPuffer balance
+        // Check vlPuffer active balance
         assertEq(pufferLocker.balanceOf(alice), amount * 4);
+        
+        // Check raw balance
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
         
         // Check total supply
         assertEq(pufferLocker.totalSupply(), amount * 4);
@@ -133,9 +136,10 @@ contract PufferLockerTest is Test {
         assertEq(lock3.end, block.timestamp + 12 weeks);
         assertEq(lock3.vlTokenAmount, (amount / 4) * 12);
         
-        // Check total vlPuffer balance
+        // Check total vlPuffer balance - should be the sum of all active locks
         uint256 expectedBalance = amount * 4 + (amount / 2) * 8 + (amount / 4) * 12;
         assertEq(pufferLocker.balanceOf(alice), expectedBalance);
+        assertEq(pufferLocker.getRawBalance(alice), expectedBalance);
         
         // Check locked token amount
         uint256 expectedLockedAmount = amount + (amount / 2) + (amount / 4);
@@ -163,6 +167,11 @@ contract PufferLockerTest is Test {
         // Move time forward to after lock expiry
         vm.warp(block.timestamp + 4 weeks + 1);
         
+        // Check that active balance is now 0 due to expiry
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        // But raw balance should still show the tokens
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
+        
         // Withdraw
         vm.startPrank(alice);
         pufferLocker.withdraw(lockId);
@@ -170,6 +179,7 @@ contract PufferLockerTest is Test {
         
         // Check balances after withdrawal
         assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.getRawBalance(alice), 0);
         assertEq(token.balanceOf(alice), amount * 10);
         
         // Check lock was reset
@@ -192,6 +202,10 @@ contract PufferLockerTest is Test {
         // Move time forward past the first lock expiry
         vm.warp(block.timestamp + 6 weeks);
         
+        // Check active balance - first lock should have expired
+        uint256 expectedActiveBalance = (amount / 2) * 8 + (amount / 4) * 12;
+        assertEq(pufferLocker.balanceOf(alice), expectedActiveBalance);
+        
         // Get expired locks
         uint256[] memory expiredLocks = pufferLocker.getExpiredLocks(alice);
         assertEq(expiredLocks.length, 1);
@@ -203,12 +217,17 @@ contract PufferLockerTest is Test {
         vm.stopPrank();
         
         // Check balances after first withdrawal
-        uint256 expectedBalance = (amount / 2) * 8 + (amount / 4) * 12;
-        assertEq(pufferLocker.balanceOf(alice), expectedBalance);
+        assertEq(pufferLocker.balanceOf(alice), expectedActiveBalance);
+        uint256 expectedRawBalance = (amount / 2) * 8 + (amount / 4) * 12;
+        assertEq(pufferLocker.getRawBalance(alice), expectedRawBalance);
         assertEq(token.balanceOf(alice), amount * 10 - amount / 2 - amount / 4);
         
         // Move time forward past the second lock expiry
         vm.warp(block.timestamp + 3 weeks);
+        
+        // Check active balance - second lock should have expired
+        expectedActiveBalance = (amount / 4) * 12;
+        assertEq(pufferLocker.balanceOf(alice), expectedActiveBalance);
         
         // Get expired locks
         expiredLocks = pufferLocker.getExpiredLocks(alice);
@@ -221,12 +240,16 @@ contract PufferLockerTest is Test {
         vm.stopPrank();
         
         // Check balances after second withdrawal
-        expectedBalance = (amount / 4) * 12;
-        assertEq(pufferLocker.balanceOf(alice), expectedBalance);
+        assertEq(pufferLocker.balanceOf(alice), expectedActiveBalance);
+        expectedRawBalance = (amount / 4) * 12;
+        assertEq(pufferLocker.getRawBalance(alice), expectedRawBalance);
         assertEq(token.balanceOf(alice), amount * 10 - amount / 4);
         
         // Move time forward past the third lock expiry
         vm.warp(block.timestamp + 4 weeks);
+        
+        // Check active balance - all locks should have expired
+        assertEq(pufferLocker.balanceOf(alice), 0);
         
         // Get expired locks
         expiredLocks = pufferLocker.getExpiredLocks(alice);
@@ -240,7 +263,39 @@ contract PufferLockerTest is Test {
         
         // Check balances after third withdrawal
         assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.getRawBalance(alice), 0);
         assertEq(token.balanceOf(alice), amount * 10);
+    }
+    
+    function test_AutomaticBalanceExpiry() public {
+        moveToWeekStart();
+        
+        // Alice creates a lock
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+        
+        // Initial check
+        assertEq(pufferLocker.balanceOf(alice), amount * 4);
+        
+        // Move time forward just before expiry
+        vm.warp(block.timestamp + 4 weeks - 1);
+        
+        // Balance should still be active
+        assertEq(pufferLocker.balanceOf(alice), amount * 4);
+        
+        // Move time forward past expiry
+        vm.warp(block.timestamp + 2);
+        
+        // Balance should now be 0 even though no transaction occurred
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        
+        // Raw balance should still show the tokens
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
+        
+        // User should still be able to withdraw
+        uint256[] memory expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, 1);
     }
 
     function test_InvalidLockId() public {
@@ -345,6 +400,11 @@ contract PufferLockerTest is Test {
         // Move time forward past Alice's lock expiry
         vm.warp(block.timestamp + 6 weeks);
         
+        // Check balances - Alice's should be expired
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.balanceOf(bob), amount * 8);
+        assertEq(pufferLocker.balanceOf(charlie), amount * 12);
+        
         // Alice withdraws
         vm.startPrank(alice);
         pufferLocker.withdraw(aliceLockId);
@@ -352,11 +412,17 @@ contract PufferLockerTest is Test {
         
         // Check balances after Alice's withdrawal
         assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.getRawBalance(alice), 0);
         assertEq(pufferLocker.balanceOf(bob), amount * 8);
         assertEq(pufferLocker.balanceOf(charlie), amount * 12);
         
         // Move time forward past Bob's lock expiry
         vm.warp(block.timestamp + 4 weeks);
+        
+        // Check balances - Bob's should be expired
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.balanceOf(bob), 0);
+        assertEq(pufferLocker.balanceOf(charlie), amount * 12);
         
         // Bob withdraws
         vm.startPrank(bob);
@@ -366,7 +432,72 @@ contract PufferLockerTest is Test {
         // Check balances after Bob's withdrawal
         assertEq(pufferLocker.balanceOf(alice), 0);
         assertEq(pufferLocker.balanceOf(bob), 0);
+        assertEq(pufferLocker.getRawBalance(bob), 0);
         assertEq(pufferLocker.balanceOf(charlie), amount * 12);
+    }
+    
+    function test_EpochBasedBalance() public {
+        moveToWeekStart();
+        
+        // Starting at epoch 0
+        uint256 initialEpoch = pufferLocker.getCurrentEpoch();
+        
+        // Alice creates a lock for 4 weeks
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+        
+        // Move forward one epoch (1 week)
+        vm.warp(block.timestamp + WEEK);
+        
+        // Should be in epoch 1
+        assertEq(pufferLocker.getCurrentEpoch(), initialEpoch + 1);
+        
+        // Check balance at current epoch
+        assertEq(pufferLocker.balanceOf(alice), amount * 4);
+        
+        // Move forward to epoch 4 (after lock expiry)
+        vm.warp(block.timestamp + 3 * WEEK);
+        
+        // Should be in epoch 4
+        assertEq(pufferLocker.getCurrentEpoch(), initialEpoch + 4);
+        
+        // Check balance - should be 0 now that lock expired
+        assertEq(pufferLocker.balanceOf(alice), 0);
+    }
+    
+    function test_TotalSupplyAtEpoch() public {
+        moveToWeekStart();
+        
+        // Starting at epoch 0
+        // No need to track initialEpoch here
+        
+        // Alice creates a lock for 4 weeks
+        vm.startPrank(alice);
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+        
+        // Bob creates a lock for 8 weeks
+        vm.startPrank(bob);
+        pufferLocker.createLock(amount, block.timestamp + 8 weeks);
+        vm.stopPrank();
+        
+        // Check total supply
+        uint256 expectedSupply = amount * 4 + amount * 8;
+        assertEq(pufferLocker.totalSupply(), expectedSupply);
+        
+        // Move forward to epoch 4 (Alice's lock expired)
+        vm.warp(block.timestamp + 4 * WEEK);
+        
+        // Check total supply - Alice's should be expired
+        expectedSupply = amount * 8;
+        assertEq(pufferLocker.totalSupply(), expectedSupply);
+        
+        // Move forward to epoch 8 (all locks expired)
+        vm.warp(block.timestamp + 4 * WEEK);
+        
+        // Check total supply - should be 0
+        assertEq(pufferLocker.totalSupply(), 0);
     }
 
     function test_TransfersDisabled() public {
@@ -503,6 +634,10 @@ contract PufferLockerTest is Test {
         // Move time forward past lock expiry
         vm.warp(block.timestamp + 6 weeks);
         
+        // Verify balance is 0 due to expiry but user can still withdraw
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
+        
         // Withdraw the lock
         vm.startPrank(alice);
         pufferLocker.withdraw(lockId);
@@ -523,13 +658,9 @@ contract PufferLockerTest is Test {
         pufferLocker.createLock(amount, block.timestamp + 4 weeks);
         vm.stopPrank();
         
-        // Check initial delegation - should be self-delegated by default now
+        // Check initial delegation - self-delegated by default
         address initialDelegatee = pufferLocker.getDelegatee(alice);
         assertEq(initialDelegatee, alice);
-        
-        uint256 aliceInitialVotes = pufferLocker.getVotes(alice);
-        uint256 aliceBalance = pufferLocker.balanceOf(alice);
-        assertEq(aliceInitialVotes, aliceBalance);
         
         // Alice delegates to Bob
         vm.startPrank(alice);
@@ -539,12 +670,16 @@ contract PufferLockerTest is Test {
         // Check delegation updated
         assertEq(pufferLocker.getDelegatee(alice), bob);
         
-        // Check voting power has been delegated
-        uint256 bobVotes = pufferLocker.getVotes(bob);
-        assertEq(bobVotes, aliceBalance);
-        assertEq(pufferLocker.getVotes(alice), 0); // Alice delegated her votes
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 5 weeks);
+        
+        // Active balance should be 0 due to expiry
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        
+        // Raw balance should still show the tokens
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
     }
-    
+
     function test_DelegateToPufferTeam() public {
         moveToWeekStart();
         
@@ -559,12 +694,16 @@ contract PufferLockerTest is Test {
         // Check delegation updated
         assertEq(pufferLocker.getDelegatee(alice), pufferTeam);
         
-        // Check voting power
-        uint256 aliceBalance = pufferLocker.balanceOf(alice);
-        uint256 teamVotes = pufferLocker.getVotes(pufferTeam);
-        assertEq(teamVotes, aliceBalance);
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 5 weeks);
+        
+        // Active balance should be 0 due to expiry
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        
+        // Raw balance should still show the tokens
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
     }
-    
+
     function test_DelegationWithMultipleLocks() public {
         moveToWeekStart();
         
@@ -578,21 +717,25 @@ contract PufferLockerTest is Test {
         vm.stopPrank();
         
         // Check delegation
-        uint256 aliceBalance = pufferLocker.balanceOf(alice);
-        uint256 bobVotes = pufferLocker.getVotes(bob);
-        assertEq(bobVotes, aliceBalance);
+        assertEq(pufferLocker.getDelegatee(alice), bob);
         
-        // Alice creates another lock - votes should go to Bob
+        // Alice creates another lock - Bob remains delegate
         vm.startPrank(alice);
         pufferLocker.createLock(amount / 4, block.timestamp + 12 weeks);
         vm.stopPrank();
         
-        // Recalculate expected votes
-        aliceBalance = pufferLocker.balanceOf(alice);
-        bobVotes = pufferLocker.getVotes(bob);
-        assertEq(bobVotes, aliceBalance);
+        // Move time forward past first lock expiry
+        vm.warp(block.timestamp + 6 weeks);
+        
+        // Get active balance - first lock should have expired
+        uint256 expectedActiveBalance = (amount / 2) * 8 + (amount / 4) * 12;
+        assertEq(pufferLocker.balanceOf(alice), expectedActiveBalance);
+        
+        // Raw balance should include all locks
+        uint256 expectedRawBalance = amount * 4 + (amount / 2) * 8 + (amount / 4) * 12;
+        assertEq(pufferLocker.getRawBalance(alice), expectedRawBalance);
     }
-    
+
     function test_WithdrawAfterDelegation() public {
         moveToWeekStart();
         
@@ -604,21 +747,257 @@ contract PufferLockerTest is Test {
         pufferLocker.delegate(bob);
         vm.stopPrank();
         
-        // Check initial votes
-        uint256 aliceBalance = pufferLocker.balanceOf(alice);
-        uint256 bobVotes = pufferLocker.getVotes(bob);
-        assertEq(bobVotes, aliceBalance);
-        
         // Move time forward past lock expiry
         vm.warp(block.timestamp + 6 weeks);
+        
+        // Active balance should be 0 due to expiry
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        
+        // Raw balance should still show the tokens
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
         
         // Alice withdraws
         vm.startPrank(alice);
         pufferLocker.withdraw(lockId);
         vm.stopPrank();
         
-        // Check votes after withdrawal
+        // Check balances after withdrawal
         assertEq(pufferLocker.balanceOf(alice), 0);
-        assertEq(pufferLocker.getVotes(bob), 0); // Bob should no longer have voting power
+        assertEq(pufferLocker.getRawBalance(alice), 0);
+    }
+
+    function test_LockSpamAttack() public {
+        moveToWeekStart();
+        
+        // Set a small amount for each lock
+        uint256 smallAmount = 1; // 1 wei, the smallest possible amount
+        
+        // Number of locks to create (simulating a spam attack)
+        uint256 numLocks = 20; // Start with a reasonable number for testing
+        
+        // Approve small amounts
+        vm.startPrank(alice);
+        token.approve(address(pufferLocker), smallAmount * numLocks);
+        
+        // Record initial gas
+        uint256 initialGas = gasleft();
+        
+        // Create many tiny locks
+        for (uint256 i = 0; i < numLocks; i++) {
+            uint256 unlockTime = block.timestamp + (i % 10 + 1) * WEEK; // Varying lock times
+            pufferLocker.createLock(smallAmount, unlockTime);
+        }
+        
+        // Measure gas used for creating locks
+        uint256 gasUsedForCreation = initialGas - gasleft();
+        console2.log("Gas used for creating", numLocks, "locks:", gasUsedForCreation);
+        
+        // Check lock count
+        assertEq(pufferLocker.getLockCount(alice), numLocks);
+        
+        // Measure gas for reading all locks
+        initialGas = gasleft();
+        pufferLocker.getAllLocks(alice);
+        uint256 gasUsedForReading = initialGas - gasleft();
+        console2.log("Gas used for reading all locks:", gasUsedForReading);
+        
+        // Measure gas for getting expired locks after some time passes
+        vm.warp(block.timestamp + 6 * WEEK); // Forward 6 weeks to expire some locks
+        
+        initialGas = gasleft();
+        pufferLocker.getExpiredLocks(alice);
+        uint256 gasUsedForExpiredLocks = initialGas - gasleft();
+        console2.log("Gas used for getting expired locks:", gasUsedForExpiredLocks);
+        vm.stopPrank();
+        
+        // Test the impact on other users when one user has many locks
+        vm.startPrank(bob);
+        initialGas = gasleft();
+        pufferLocker.createLock(amount, block.timestamp + 4 * WEEK);
+        uint256 gasUsedForOtherUser = initialGas - gasleft();
+        console2.log("Gas used for creation by other user:", gasUsedForOtherUser);
+        vm.stopPrank();
+        
+        // Enable emergency shutdown as the contract owner (address(this))
+        pufferLocker.enableEmergencyShutdown();
+        
+        // Test emergency withdrawal as alice
+        vm.startPrank(alice);
+        // Try emergency withdraw with one lock
+        uint256 firstLockId = 0;
+        initialGas = gasleft();
+        pufferLocker.emergencyWithdraw(firstLockId);
+        uint256 gasUsedForEmergencyWithdraw = initialGas - gasleft();
+        console2.log("Gas used for emergency withdraw:", gasUsedForEmergencyWithdraw);
+        vm.stopPrank();
+        
+        // Calculate maximum possible locks in a single block
+        uint256 blockGasLimit = 30000000; // Ethereum's block gas limit (approximate)
+        uint256 estimatedMaxLocks = blockGasLimit / (gasUsedForCreation / numLocks);
+        console2.log("Estimated max locks per block:", estimatedMaxLocks);
+        
+        // Determine if this is a concern that needs mitigation
+        bool isAttackConcern = gasUsedForReading > 5000000 || // If reading becomes too expensive
+                               gasUsedForExpiredLocks > 5000000 || // If getting expired locks becomes too expensive
+                               estimatedMaxLocks > 1000; // If one can create too many locks in a block
+                               
+        console2.log("Is attack a concern:", isAttackConcern);
+    }
+    
+    function test_EpochSpamAttack() public {
+        moveToWeekStart();
+        
+        // Simulate a long period of inactivity
+        uint256 inactiveWeeks = 100; // 100 weeks (about 2 years)
+        vm.warp(block.timestamp + inactiveWeeks * WEEK);
+        
+        // Try to create a lock after the long inactivity
+        vm.startPrank(alice);
+        uint256 gasBeforeFirstTx = gasleft();
+        pufferLocker.createLock(amount, block.timestamp + 4 * WEEK);
+        uint256 gasUsedFirstTx = gasBeforeFirstTx - gasleft();
+        console2.log("Gas used after", inactiveWeeks, "weeks of inactivity:", gasUsedFirstTx);
+        
+        // Check if it processed all epochs or was limited
+        uint256 currentEpoch = pufferLocker.currentEpoch();
+        console2.log("Current epoch after first tx:", currentEpoch);
+        console2.log("Expected epoch if all processed:", inactiveWeeks);
+        
+        // Create another lock to see if epoch processing continues
+        uint256 gasBeforeSecondTx = gasleft();
+        pufferLocker.createLock(amount, block.timestamp + 4 * WEEK);
+        uint256 gasUsedSecondTx = gasBeforeSecondTx - gasleft();
+        console2.log("Gas used for second tx:", gasUsedSecondTx);
+        
+        // Check new epoch
+        uint256 newEpoch = pufferLocker.currentEpoch();
+        console2.log("Current epoch after second tx:", newEpoch);
+        
+        // Manually process remaining epochs
+        if (newEpoch < inactiveWeeks) {
+            pufferLocker.processEpochTransitions(inactiveWeeks - newEpoch);
+            console2.log("Current epoch after manual processing:", pufferLocker.currentEpoch());
+        }
+        
+        vm.stopPrank();
+    }
+
+    function test_LockSpamAttackLarge() public {
+        moveToWeekStart();
+        
+        // Set a small amount for each lock
+        uint256 smallAmount = 1; // 1 wei, the smallest possible amount
+        
+        // Number of locks to create (simulating a spam attack)
+        uint256 numLocks = 100; // Testing with a larger number of locks
+        
+        // Approve small amounts
+        vm.startPrank(alice);
+        token.approve(address(pufferLocker), smallAmount * numLocks);
+        
+        // Record initial gas
+        uint256 initialGas = gasleft();
+        
+        // Create many tiny locks
+        for (uint256 i = 0; i < numLocks; i++) {
+            uint256 unlockTime = block.timestamp + (i % 10 + 1) * WEEK; // Varying lock times
+            pufferLocker.createLock(smallAmount, unlockTime);
+        }
+        
+        // Measure gas used for creating locks
+        uint256 gasUsedForCreation = initialGas - gasleft();
+        console2.log("Gas used for creating", numLocks, "locks:", gasUsedForCreation);
+        
+        // Check lock count
+        assertEq(pufferLocker.getLockCount(alice), numLocks);
+        
+        // Measure gas for paginated lock reading (more realistic for large numbers)
+        initialGas = gasleft();
+        pufferLocker.getLocks(alice, 0, 20); // Read first 20 locks
+        uint256 gasUsedForPaginatedReading = initialGas - gasleft();
+        console2.log("Gas used for paginated reading (20 locks):", gasUsedForPaginatedReading);
+        
+        // Measure gas for reading all locks (potentially expensive with many locks)
+        initialGas = gasleft();
+        pufferLocker.getAllLocks(alice);
+        uint256 gasUsedForReading = initialGas - gasleft();
+        console2.log("Gas used for reading all locks:", gasUsedForReading);
+        
+        // Measure gas for getting expired locks after some time passes
+        vm.warp(block.timestamp + 6 * WEEK); // Forward 6 weeks to expire some locks
+        
+        initialGas = gasleft();
+        pufferLocker.getExpiredLocks(alice);
+        uint256 gasUsedForExpiredLocks = initialGas - gasleft();
+        console2.log("Gas used for getting expired locks:", gasUsedForExpiredLocks);
+        
+        // Also test paginated version
+        initialGas = gasleft();
+        pufferLocker.getExpiredLocks(alice, 0, 20);
+        uint256 gasUsedForPaginatedExpiredLocks = initialGas - gasleft();
+        console2.log("Gas used for paginated expired locks:", gasUsedForPaginatedExpiredLocks);
+        vm.stopPrank();
+        
+        // Calculate maximum possible locks in a single block
+        uint256 blockGasLimit = 30000000; // Ethereum's block gas limit (approximate)
+        uint256 estimatedMaxLocks = blockGasLimit / (gasUsedForCreation / numLocks);
+        console2.log("Estimated max locks per block:", estimatedMaxLocks);
+        
+        // Estimate gas for various operations at scale
+        console2.log("Estimated gas for 1000 locks getAllLocks():", (gasUsedForReading * 1000) / numLocks);
+        console2.log("Estimated gas for 1000 locks getExpiredLocks():", (gasUsedForExpiredLocks * 1000) / numLocks);
+        
+        // Determine if this is a concern that needs mitigation
+        bool isAttackConcern = (gasUsedForReading * 1000) / numLocks > 30000000 || // If reading at scale becomes impossible
+                               (gasUsedForExpiredLocks * 1000) / numLocks > 30000000 || // If getting expired locks at scale becomes impossible
+                               estimatedMaxLocks > 1000; // If one can create too many locks in a block
+        
+        console2.log("Is attack a concern:", isAttackConcern);
+    }
+
+    function test_MassWithdrawalAttack() public {
+        moveToWeekStart();
+        
+        // Number of locks to create
+        uint256 numLocks = 50;
+        uint256 lockAmount = amount / 100; // Use a smaller amount per lock
+        
+        // Mint more tokens if needed
+        token.mint(alice, lockAmount * numLocks);
+        
+        // Approve tokens
+        vm.startPrank(alice);
+        token.approve(address(pufferLocker), lockAmount * numLocks);
+        
+        // Create many locks with short durations
+        for (uint256 i = 0; i < numLocks; i++) {
+            uint256 unlockTime = block.timestamp + 1 weeks; // All expire at the same time
+            pufferLocker.createLock(lockAmount, unlockTime);
+        }
+        
+        // Move forward past expiry
+        vm.warp(block.timestamp + 2 weeks);
+        
+        // Get expired locks
+        uint256[] memory expiredLocks = pufferLocker.getExpiredLocks(alice);
+        assertEq(expiredLocks.length, numLocks);
+        
+        // Measure gas for withdrawing each lock
+        uint256 totalGasUsed = 0;
+        for (uint256 i = 0; i < expiredLocks.length; i++) {
+            uint256 initialGas = gasleft();
+            pufferLocker.withdraw(expiredLocks[i]);
+            uint256 gasUsed = initialGas - gasleft();
+            totalGasUsed += gasUsed;
+            
+            if (i == 0 || i == expiredLocks.length - 1) {
+                console2.log("Gas used for withdrawal", i, ":", gasUsed);
+            }
+        }
+        
+        console2.log("Average gas per withdrawal:", totalGasUsed / expiredLocks.length);
+        console2.log("Max withdrawals possible in one block (30M gas):", 30000000 / (totalGasUsed / expiredLocks.length));
+        
+        vm.stopPrank();
     }
 }
