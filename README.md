@@ -6,22 +6,23 @@ PufferLocker is a production-grade Solidity contract implementing a token voting
 
 - **Epoch-Based Voting Power**: Voting power is allocated based on locked token amount × lock duration in weeks
 - **Multiple Locks**: Users can have multiple independent locks with different expiration times
-- **Automatic Expiry**: Voting power automatically expires when locks end without requiring transactions
+- **No Decay, Full Expiry**: Voting power remains constant during the lock period and expires completely at the end
 - **Delegation**: Users can delegate their voting power to other addresses, including a specific Puffer team address
-- **Non-transferable**: vlPuffer tokens represent staked positions and cannot be transferred
+- **Non-transferable**: vlPUFFER tokens represent staked positions and cannot be transferred
 - **History Tracking**: Epoch-based system allows querying historical voting power
-- **Security**: Implements OpenZeppelin's ReentrancyGuard to prevent reentrancy attacks
 - **Emergency Shutdown**: Includes admin-controlled emergency shutdown with withdrawal capabilities
+- **Relock Capability**: Users can relock their expired tokens for a new duration without withdrawing
 
 ## Technical Implementation
 
 - **Lock Mechanism**: Tokens are locked for a user-specified duration (up to 2 years maximum)
 - **Voting Power Calculation**: `votingPower = lockedAmount × lockDurationInWeeks`
-- **vlPuffer Tokens**: Non-transferable ERC20 tokens representing voting power
-- **Time-Based Decay**: Voting power automatically expires at lock end through view function logic
+- **vlPUFFER Tokens**: Non-transferable ERC20 tokens representing voting power
+- **Immediate Expiration**: Voting power remains constant throughout the lock period and expires completely at the end
 - **Collateral Integrity**: Original tokens always remain withdrawable after lock expiry
 - **Pagination**: Efficient pagination support for users with many locks
 - **Gas Optimization**: Optimized user tracking and epoch transitions for better gas efficiency
+- **Seamless Relocking**: Expired locks can be renewed without withdrawing and redepositing tokens
 
 ## Contract Architecture
 
@@ -39,6 +40,9 @@ function createLock(uint256 _value, uint256 _unlockTime) external returns (uint2
 
 // Withdraw tokens from an expired lock
 function withdraw(uint256 _lockId) external;
+
+// Relock tokens from an expired lock for a new duration
+function relockExpiredLock(uint256 _lockId, uint256 _unlockTime) external returns (bool);
 
 // Delegate voting power to the Puffer team
 function delegateToPufferTeam() external;

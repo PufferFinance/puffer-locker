@@ -88,7 +88,7 @@ contract PufferLockerTest is Test {
         assertEq(lock.end, block.timestamp + 4 weeks);
         assertEq(lock.vlTokenAmount, amount * 4); // 4 weeks = 4x multiplier
 
-        // Check vlPuffer active balance
+        // Check vlPUFFER active balance
         assertEq(pufferLocker.balanceOf(alice), amount * 4);
 
         // Check raw balance
@@ -136,7 +136,7 @@ contract PufferLockerTest is Test {
         assertEq(lock3.end, block.timestamp + 12 weeks);
         assertEq(lock3.vlTokenAmount, (amount / 4) * 12);
 
-        // Check total vlPuffer balance - should be the sum of all active locks
+        // Check total vlPUFFER balance - should be the sum of all active locks
         uint256 expectedBalance = amount * 4 + (amount / 2) * 8 + (amount / 4) * 12;
         assertEq(pufferLocker.balanceOf(alice), expectedBalance);
         assertEq(pufferLocker.getRawBalance(alice), expectedBalance);
@@ -508,7 +508,7 @@ contract PufferLockerTest is Test {
         pufferLocker.createLock(amount, block.timestamp + 4 weeks);
         vm.stopPrank();
 
-        // Try to transfer vlPuffer tokens
+        // Try to transfer vlPUFFER tokens
         vm.startPrank(alice);
         vm.expectRevert(PufferLocker.TransfersDisabled.selector);
         pufferLocker.transfer(bob, amount);
@@ -1001,5 +1001,152 @@ contract PufferLockerTest is Test {
         );
 
         vm.stopPrank();
+    }
+
+    function test_RelockExpiredLock() public {
+        moveToWeekStart();
+
+        // Alice creates a 4-week lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+
+        // Check initial balance
+        assertEq(pufferLocker.balanceOf(alice), amount * 4);
+        assertEq(token.balanceOf(alice), amount * 10 - amount);
+
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 4 weeks + 1);
+
+        // Check that active balance is now 0 due to expiry
+        assertEq(pufferLocker.balanceOf(alice), 0);
+        // But raw balance should still show the tokens
+        assertEq(pufferLocker.getRawBalance(alice), amount * 4);
+
+        // Relock expired lock for 8 more weeks
+        vm.startPrank(alice);
+        pufferLocker.relockExpiredLock(lockId, block.timestamp + 8 weeks);
+        vm.stopPrank();
+
+        // Get the updated lock
+        PufferLocker.Lock memory lock = pufferLocker.getLock(alice, lockId);
+
+        // Check updated lock details
+        assertEq(lock.amount, amount);
+        
+        // The end time should be aligned to a week boundary
+        uint256 expectedEndTime = (block.timestamp + 8 weeks) / WEEK * WEEK;
+        assertEq(lock.end, expectedEndTime);
+        
+        // Calculate expected token amount based on actual epochs until end time
+        uint256 expectedEpochs = (expectedEndTime - block.timestamp) / WEEK;
+        uint256 expectedVlTokenAmount = amount * expectedEpochs;
+        assertEq(lock.vlTokenAmount, expectedVlTokenAmount);
+
+        // Check vlPUFFER active balance
+        assertEq(pufferLocker.balanceOf(alice), expectedVlTokenAmount);
+
+        // Check raw balance
+        assertEq(pufferLocker.getRawBalance(alice), expectedVlTokenAmount);
+
+        // Original amount of PUFFER tokens should still be locked
+        assertEq(token.balanceOf(alice), amount * 10 - amount);
+        assertEq(pufferLocker.totalLockedSupply(), amount);
+    }
+
+    function test_RelockExpiredLockInvalidStates() public {
+        moveToWeekStart();
+
+        // Alice creates a 4-week lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+
+        // Try to relock before expiry
+        vm.startPrank(alice);
+        vm.expectRevert(PufferLocker.LockNotExpired.selector);
+        pufferLocker.relockExpiredLock(lockId, block.timestamp + 8 weeks);
+        vm.stopPrank();
+
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 4 weeks + 1);
+
+        // Test NoExistingLock error with a non-existent lock
+        vm.startPrank(alice);
+        
+        // First withdraw the lock to make it non-existent
+        pufferLocker.withdraw(lockId);
+        
+        // Now try to relock the withdrawn lock
+        vm.expectRevert(PufferLocker.NoExistingLock.selector);
+        pufferLocker.relockExpiredLock(lockId, block.timestamp + 8 weeks);
+        vm.stopPrank();
+    }
+
+    // Add a dedicated test for MAX_LOCK_TIME validation in relockExpiredLock
+    function test_RelockExpiredLockMaxLockTime() public {
+        moveToWeekStart();
+
+        // Alice creates a short lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+
+        // Move time forward to just past lock expiry
+        vm.warp(block.timestamp + 4 weeks + 1);
+
+        // Try to relock with way too long a lock time
+        vm.startPrank(alice);
+        uint256 tooLongLockTime = block.timestamp + 3 * 365 days; // 3 years, well beyond MAX_LOCK_TIME (2 years)
+        vm.expectRevert(PufferLocker.ExceedsMaxLockTime.selector);
+        pufferLocker.relockExpiredLock(lockId, tooLongLockTime);
+        vm.stopPrank();
+    }
+
+    function test_RelockMultipleTimes() public {
+        moveToWeekStart();
+
+        // Alice creates a 4-week lock
+        vm.startPrank(alice);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 4 weeks + 1);
+
+        // Relock for 8 weeks
+        vm.startPrank(alice);
+        pufferLocker.relockExpiredLock(lockId, block.timestamp + 8 weeks);
+        vm.stopPrank();
+
+        // Move time forward past the second lock expiry
+        vm.warp(block.timestamp + 8 weeks + 1);
+
+        // Relock for 12 weeks
+        vm.startPrank(alice);
+        pufferLocker.relockExpiredLock(lockId, block.timestamp + 12 weeks);
+        vm.stopPrank();
+
+        // Get the updated lock
+        PufferLocker.Lock memory lock = pufferLocker.getLock(alice, lockId);
+
+        // Check updated lock details
+        assertEq(lock.amount, amount);
+        
+        // The end time should be aligned to a week boundary
+        uint256 expectedEndTime = (block.timestamp + 12 weeks) / WEEK * WEEK;
+        assertEq(lock.end, expectedEndTime);
+        
+        // Calculate expected token amount based on actual epochs until end time
+        uint256 expectedEpochs = (expectedEndTime - block.timestamp) / WEEK;
+        uint256 expectedVlTokenAmount = amount * expectedEpochs;
+        assertEq(lock.vlTokenAmount, expectedVlTokenAmount);
+
+        // Check vlPUFFER active balance
+        assertEq(pufferLocker.balanceOf(alice), expectedVlTokenAmount);
+
+        // Original amount of PUFFER tokens should still be locked
+        assertEq(token.balanceOf(alice), amount * 10 - amount);
+        assertEq(pufferLocker.totalLockedSupply(), amount);
     }
 }

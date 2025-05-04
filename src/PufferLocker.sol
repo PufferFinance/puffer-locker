@@ -15,8 +15,8 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  *         compatible with OpenZeppelin ERC20Votes with time-based voting power expiry.
  *
  * This contract allows users to lock Puffer tokens for a specified duration.
- * In return, they receive vlPuffer tokens that represent voting power.
- * The amount of vlPuffer tokens received is proportional to the amount of Puffer tokens locked
+ * In return, they receive vlPUFFER tokens that represent voting power.
+ * The amount of vlPUFFER tokens received is proportional to the amount of Puffer tokens locked
  * and the lock duration, with each week of lock time multiplying the voting power.
  *
  * Key features:
@@ -48,7 +48,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
     struct Lock {
         uint256 amount; // Amount of PUFFER tokens locked
         uint256 end; // Timestamp when the lock expires
-        uint256 vlTokenAmount; // Amount of vlPuffer tokens minted for this lock
+        uint256 vlTokenAmount; // Amount of vlPUFFER tokens minted for this lock
     }
 
     struct EpochPoint {
@@ -74,6 +74,14 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
     event EmergencyWithdraw(address indexed user, uint256 amount);
     event UserRemoved(address indexed user);
     event EpochCheckpointWarning(uint256 currentProcessedEpoch, uint256 targetEpoch);
+    event Relock(
+        address indexed provider,
+        uint256 indexed lockId,
+        uint256 value,
+        uint256 newLocktime,
+        uint256 newVlTokenAmount,
+        uint256 ts
+    );
 
     // ------------------------ STATE VARIABLES ------------------------
     IERC20 public immutable PUFFER;
@@ -97,7 +105,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
     mapping(address => uint256) public userLockCount;
     // User address => number of active locks (locks with amount > 0)
     mapping(address => uint256) public userActiveLockCount;
-    // User address => total vlPuffer balance including expired locks
+    // User address => total vlPUFFER balance including expired locks
     mapping(address => uint256) public userVlTokenBalance;
 
     // Array of all users that have created locks
@@ -112,8 +120,8 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
 
     // ------------------------ CONSTRUCTOR ------------------------
     constructor(IERC20 _puffer, address _pufferTeam)
-        ERC20("vlPuffer", "vlPuffer")
-        ERC20Permit("vlPuffer")
+        ERC20("vlPUFFER", "vlPUFFER")
+        ERC20Permit("vlPUFFER")
         Ownable(msg.sender)
     {
         PUFFER = _puffer;
@@ -305,6 +313,57 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
         emit Supply(supplyBefore, lockedSupply);
 
         return lockId;
+    }
+
+    /**
+     * @notice Relock tokens from an expired lock for a new duration
+     * @param _lockId The ID of the expired lock to relock
+     * @param _unlockTime New timestamp when the lock will expire
+     */
+    function relockExpiredLock(uint256 _lockId, uint256 _unlockTime)
+        external
+        nonReentrant
+        whenNotPaused
+        validLockId(msg.sender, _lockId)
+        validUnlockTime(_unlockTime)
+        returns (bool)
+    {
+        // Update epoch if needed
+        _checkpointEpoch();
+
+        Lock storage lock = userLocks[msg.sender][_lockId];
+
+        if (lock.amount == 0) revert NoExistingLock();
+        if (block.timestamp < lock.end) revert LockNotExpired();
+
+        uint256 amount = lock.amount;
+        uint256 oldVlTokenAmount = lock.vlTokenAmount;
+
+        uint256 unlockTime = (_unlockTime / EPOCH_DURATION) * EPOCH_DURATION;
+        
+        // Calculate number of epochs for the new lock
+        uint256 numEpochs = (unlockTime - block.timestamp) / EPOCH_DURATION;
+        
+        // Calculate new vlToken amount
+        uint256 newVlTokenAmount = amount * numEpochs;
+
+        // Update the lock with new end time and token amount
+        lock.end = unlockTime;
+        lock.vlTokenAmount = newVlTokenAmount;
+
+        // Update user's vlToken balance
+        userVlTokenBalance[msg.sender] = userVlTokenBalance[msg.sender] - oldVlTokenAmount + newVlTokenAmount;
+
+        // Mint new voting power tokens
+        _mint(msg.sender, newVlTokenAmount);
+        
+        // Burn old tokens (note: voting power might already be 0 due to expiry)
+        _burn(msg.sender, oldVlTokenAmount);
+
+        // Emit events
+        emit Relock(msg.sender, _lockId, amount, unlockTime, newVlTokenAmount, block.timestamp);
+        
+        return true;
     }
 
     /**
@@ -766,8 +825,8 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
     // ------------------------ OVERRIDES REQUIRED BY SOLIDITY ------------------------
 
     /**
-     * @dev Override the _update function to disable transfers of vlPuffer tokens.
-     * vlPuffer tokens represent specific locks and cannot be transferred as they
+     * @dev Override the _update function to disable transfers of vlPUFFER tokens.
+     * vlPUFFER tokens represent specific locks and cannot be transferred as they
      * are tied to the user's locked PUFFER tokens.
      */
     function _update(address from, address to, uint256 amount) internal override(ERC20, ERC20Votes) {
