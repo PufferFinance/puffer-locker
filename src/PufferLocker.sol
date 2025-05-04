@@ -340,10 +340,10 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
         uint256 oldVlTokenAmount = lock.vlTokenAmount;
 
         uint256 unlockTime = (_unlockTime / EPOCH_DURATION) * EPOCH_DURATION;
-        
+
         // Calculate number of epochs for the new lock
         uint256 numEpochs = (unlockTime - block.timestamp) / EPOCH_DURATION;
-        
+
         // Calculate new vlToken amount
         uint256 newVlTokenAmount = amount * numEpochs;
 
@@ -356,13 +356,13 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard, Ownabl
 
         // Mint new voting power tokens
         _mint(msg.sender, newVlTokenAmount);
-        
+
         // Burn old tokens (note: voting power might already be 0 due to expiry)
         _burn(msg.sender, oldVlTokenAmount);
 
         // Emit events
         emit Relock(msg.sender, _lockId, amount, unlockTime, newVlTokenAmount, block.timestamp);
-        
+
         return true;
     }
 

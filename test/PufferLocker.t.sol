@@ -1033,11 +1033,11 @@ contract PufferLockerTest is Test {
 
         // Check updated lock details
         assertEq(lock.amount, amount);
-        
+
         // The end time should be aligned to a week boundary
         uint256 expectedEndTime = (block.timestamp + 8 weeks) / WEEK * WEEK;
         assertEq(lock.end, expectedEndTime);
-        
+
         // Calculate expected token amount based on actual epochs until end time
         uint256 expectedEpochs = (expectedEndTime - block.timestamp) / WEEK;
         uint256 expectedVlTokenAmount = amount * expectedEpochs;
@@ -1073,10 +1073,10 @@ contract PufferLockerTest is Test {
 
         // Test NoExistingLock error with a non-existent lock
         vm.startPrank(alice);
-        
+
         // First withdraw the lock to make it non-existent
         pufferLocker.withdraw(lockId);
-        
+
         // Now try to relock the withdrawn lock
         vm.expectRevert(PufferLocker.NoExistingLock.selector);
         pufferLocker.relockExpiredLock(lockId, block.timestamp + 8 weeks);
@@ -1132,11 +1132,11 @@ contract PufferLockerTest is Test {
 
         // Check updated lock details
         assertEq(lock.amount, amount);
-        
+
         // The end time should be aligned to a week boundary
         uint256 expectedEndTime = (block.timestamp + 12 weeks) / WEEK * WEEK;
         assertEq(lock.end, expectedEndTime);
-        
+
         // Calculate expected token amount based on actual epochs until end time
         uint256 expectedEpochs = (expectedEndTime - block.timestamp) / WEEK;
         uint256 expectedVlTokenAmount = amount * expectedEpochs;
