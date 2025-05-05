@@ -1,31 +1,38 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {Test, console2} from "forge-std/Test.sol";
-import {PufferLocker} from "../src/PufferLocker.sol";
-import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
+import { PufferLocker } from "../src/PufferLocker.sol";
+
+import { ERC20PermitMock } from "./mocks/ERC20PermitMock.sol";
+import { ERC20Mock } from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Test, console2 } from "forge-std/Test.sol";
 
 contract PufferLockerTest is Test {
     // Constants
     uint256 constant WEEK = 1 weeks;
     uint256 constant MAX_LOCK_TIME = 2 * 365 days; // 2 years
+    // Hardcoded Puffer token address (same as in PufferLocker.sol)
+    address constant PUFFER_ADDRESS = 0x4d1C297d39C5c1277964D0E3f8Aa901493664530;
 
     // Actors
     address alice;
+    uint256 alicePrivateKey;
     address bob;
     address charlie;
     address pufferTeam;
 
     // Contracts
-    ERC20Mock public token;
+    ERC20PermitMock public token;
     PufferLocker public pufferLocker;
 
     // Amounts
     uint256 amount;
 
     function setUp() public {
-        // Setup accounts
-        alice = address(0x1);
+        // Setup accounts with known private keys for permit signing
+        alicePrivateKey = 0xA11CE;
+        alice = vm.addr(alicePrivateKey);
         bob = address(0x2);
         charlie = address(0x3);
         pufferTeam = address(0x4);
@@ -34,17 +41,22 @@ contract PufferLockerTest is Test {
         vm.label(charlie, "Charlie");
         vm.label(pufferTeam, "Puffer Team");
 
+        // Deploy the ERC20PermitMock at the hardcoded Puffer address
+        vm.etch(PUFFER_ADDRESS, address(new ERC20PermitMock("Puffer", "PUFFER", 18)).code);
+
+        // Get a reference to the mock token at the hardcoded address
+        token = ERC20PermitMock(PUFFER_ADDRESS);
+
         // Mint tokens to users
         amount = 1000 * 10 ** 18;
-        token = new ERC20Mock();
         token.mint(alice, amount * 10);
         token.mint(bob, amount * 10);
         token.mint(charlie, amount * 10);
 
         // Setup PufferLocker
-        pufferLocker = new PufferLocker(token, pufferTeam);
+        pufferLocker = new PufferLocker(pufferTeam);
 
-        // Approve pufferLocker to spend tokens
+        // Approve pufferLocker to spend tokens for normal tests
         vm.startPrank(alice);
         token.approve(address(pufferLocker), amount * 100);
         vm.stopPrank();
@@ -818,8 +830,8 @@ contract PufferLockerTest is Test {
         console2.log("Gas used for creation by other user:", gasUsedForOtherUser);
         vm.stopPrank();
 
-        // Enable emergency shutdown as the contract owner (address(this))
-        pufferLocker.enableEmergencyShutdown();
+        // Enable pausing as the contract owner (address(this))
+        pufferLocker.pause();
 
         // Test emergency withdrawal as alice
         vm.startPrank(alice);
@@ -842,6 +854,53 @@ contract PufferLockerTest is Test {
             || estimatedMaxLocks > 1000; // If one can create too many locks in a block
 
         console2.log("Is attack a concern:", isAttackConcern);
+    }
+
+    // Add test for Pausable functionality
+    function test_PausableBasics() public {
+        // Contract should not be paused initially
+        assertFalse(pufferLocker.paused());
+
+        // Alice should be able to create a lock when not paused
+        vm.startPrank(alice);
+        token.approve(address(pufferLocker), amount);
+        uint256 lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+
+        // Owner pauses the contract
+        pufferLocker.pause();
+
+        // Contract should now be paused
+        assertTrue(pufferLocker.paused());
+
+        // Alice should not be able to create a lock when paused
+        vm.startPrank(alice);
+        token.approve(address(pufferLocker), amount);
+        vm.expectRevert();
+        pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.stopPrank();
+
+        // Move time forward past lock expiry
+        vm.warp(block.timestamp + 5 weeks);
+
+        // Alice should be able to use emergency withdraw when paused
+        vm.startPrank(alice);
+        pufferLocker.emergencyWithdraw(lockId);
+        vm.stopPrank();
+
+        // Owner unpauses the contract
+        pufferLocker.unpause();
+
+        // Contract should now be unpaused
+        assertFalse(pufferLocker.paused());
+
+        // Emergency withdraw should not work when not paused
+        vm.startPrank(alice);
+        token.approve(address(pufferLocker), amount);
+        lockId = pufferLocker.createLock(amount, block.timestamp + 4 weeks);
+        vm.expectRevert(PufferLocker.EmergencyUnlockNotEnabled.selector);
+        pufferLocker.emergencyWithdraw(lockId);
+        vm.stopPrank();
     }
 
     function test_EpochSpamAttack() public {
@@ -1148,5 +1207,62 @@ contract PufferLockerTest is Test {
         // Original amount of PUFFER tokens should still be locked
         assertEq(token.balanceOf(alice), amount * 10 - amount);
         assertEq(pufferLocker.totalLockedSupply(), amount);
+    }
+
+    function test_CreateLockWithPermit() public {
+        moveToWeekStart();
+
+        // Set up a new user with no existing approval
+        uint256 davidPrivateKey = 0xDAD1D;
+        address david = vm.addr(davidPrivateKey);
+        token.mint(david, amount * 10);
+
+        // Create permit signature parameters
+        uint256 deadline = block.timestamp + 1 days;
+
+        // Generate the permit signature
+        bytes32 digest = token.getPermitDigest(
+            david, // owner
+            address(pufferLocker), // spender
+            amount, // value
+            token.nonces(david), // nonce
+            deadline // deadline
+        );
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(davidPrivateKey, digest);
+
+        // David calls createLockWithPermit (no approve needed)
+        vm.startPrank(david);
+        uint256 lockId = pufferLocker.createLockWithPermit(
+            amount, // _value
+            block.timestamp + 4 weeks, // _unlockTime
+            deadline, // _deadline
+            v,
+            r,
+            s // signature components
+        );
+        vm.stopPrank();
+
+        // Check lock was created successfully
+        assertEq(lockId, 0);
+        assertEq(pufferLocker.getLockCount(david), 1);
+
+        // Get the lock
+        PufferLocker.Lock memory lock = pufferLocker.getLock(david, lockId);
+
+        // Check lock details
+        assertEq(lock.amount, amount);
+        assertEq(lock.end, block.timestamp + 4 weeks);
+        assertEq(lock.vlTokenAmount, amount * 4); // 4 weeks = 4x multiplier
+
+        // Check vlPUFFER active balance
+        assertEq(pufferLocker.balanceOf(david), amount * 4);
+
+        // Check raw balance
+        assertEq(pufferLocker.getRawBalance(david), amount * 4);
+
+        // Verify token was transferred (without an explicit approve call)
+        assertEq(token.balanceOf(david), amount * 10 - amount);
+        assertEq(token.allowance(david, address(pufferLocker)), 0); // No allowance should exist
     }
 }

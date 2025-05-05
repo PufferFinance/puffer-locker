@@ -10,8 +10,9 @@ PufferLocker is a production-grade Solidity contract implementing a token voting
 - **Delegation**: Users can delegate their voting power to other addresses, including a specific Puffer team address
 - **Non-transferable**: vlPUFFER tokens represent staked positions and cannot be transferred
 - **History Tracking**: Epoch-based system allows querying historical voting power
-- **Emergency Shutdown**: Includes admin-controlled emergency shutdown with withdrawal capabilities
+- **Pausable**: Includes standard OpenZeppelin Pausable functionality with emergency withdrawals
 - **Relock Capability**: Users can relock their expired tokens for a new duration without withdrawing
+- **Gasless Approvals**: Supports ERC2612 permit functionality to create locks without requiring separate approval transactions
 
 ## Technical Implementation
 
@@ -23,6 +24,8 @@ PufferLocker is a production-grade Solidity contract implementing a token voting
 - **Pagination**: Efficient pagination support for users with many locks
 - **Gas Optimization**: Optimized user tracking and epoch transitions for better gas efficiency
 - **Seamless Relocking**: Expired locks can be renewed without withdrawing and redepositing tokens
+- **Standard Security Controls**: Uses OpenZeppelin's Pausable implementation for emergency control
+- **ERC2612 Support**: Implements permit functionality for gasless lock creation in a single transaction
 
 ## Contract Architecture
 
@@ -37,6 +40,9 @@ PufferLocker is a production-grade Solidity contract implementing a token voting
 ```solidity
 // Create a new lock
 function createLock(uint256 _value, uint256 _unlockTime) external returns (uint256 lockId);
+
+// Create a new lock using permit functionality (no separate approval needed)
+function createLockWithPermit(uint256 _value, uint256 _unlockTime, uint256 _deadline, uint8 v, bytes32 r, bytes32 s) external returns (uint256 lockId);
 
 // Withdraw tokens from an expired lock
 function withdraw(uint256 _lockId) external;
@@ -55,6 +61,12 @@ function getRawBalance(address account) external view returns (uint256);
 
 // View voting power at a specific epoch
 function balanceOfAtEpoch(address account, uint256 _epoch) public view returns (uint256);
+
+// Pause the contract in emergency situations
+function pause() external;
+
+// Unpause the contract
+function unpause() external;
 ```
 
 ## Deployment
@@ -100,7 +112,7 @@ For deploying with custom token and team addresses:
 
 ```bash
 forge script script/Deploy.s.sol:DeployPufferLockerWithCustomParams \
-  --sig "run(address,address)" $PUFFER_TOKEN_ADDRESS $PUFFER_TEAM_ADDRESS \
+  --sig "run(address)" $PUFFER_TEAM_ADDRESS \
   --rpc-url $RPC_URL \
   --private-key $PRIVATE_KEY \
   --broadcast \
