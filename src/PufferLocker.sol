@@ -446,7 +446,6 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
         whenNotPaused
         validLockId(msg.sender, lockId)
         validUnlockTime(unlockTime)
-        returns (bool)
     {
         // Update epoch if needed
         _checkpointEpoch();
@@ -482,8 +481,6 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
 
         // Emit events
         emit Relock(msg.sender, lockId, amount, alignedUnlockTime, newVlTokenAmount, block.timestamp);
-
-        return true;
     }
 
     /**
