@@ -810,15 +810,6 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
     }
 
     /**
-     * @notice Returns the address delegated to by a specific account
-     * @param account Address of the account
-     * @return Address to which the account has delegated its voting power
-     */
-    function getDelegatee(address account) external view returns (address) {
-        return delegates(account);
-    }
-
-    /**
      * @notice Get the total number of users that have created locks
      * @return Total number of users
      */

@@ -671,7 +671,7 @@ contract PufferLockerTest is Test {
         vm.stopPrank();
 
         // Check initial delegation - self-delegated by default
-        address initialDelegatee = pufferLocker.getDelegatee(alice);
+        address initialDelegatee = pufferLocker.delegates(alice);
         assertEq(initialDelegatee, alice);
 
         // Alice delegates to Bob
@@ -680,7 +680,7 @@ contract PufferLockerTest is Test {
         vm.stopPrank();
 
         // Check delegation updated
-        assertEq(pufferLocker.getDelegatee(alice), bob);
+        assertEq(pufferLocker.delegates(alice), bob);
 
         // Move time forward past lock expiry
         vm.warp(block.timestamp + 5 weeks);
@@ -704,7 +704,7 @@ contract PufferLockerTest is Test {
         vm.stopPrank();
 
         // Check delegation updated
-        assertEq(pufferLocker.getDelegatee(alice), pufferTeam);
+        assertEq(pufferLocker.delegates(alice), pufferTeam);
 
         // Move time forward past lock expiry
         vm.warp(block.timestamp + 5 weeks);
@@ -729,7 +729,7 @@ contract PufferLockerTest is Test {
         vm.stopPrank();
 
         // Check delegation
-        assertEq(pufferLocker.getDelegatee(alice), bob);
+        assertEq(pufferLocker.delegates(alice), bob);
 
         // Alice creates another lock - Bob remains delegate
         vm.startPrank(alice);
