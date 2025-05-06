@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
+import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
@@ -10,7 +11,6 @@ import { IERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Nonces } from "@openzeppelin/contracts/utils/Nonces.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
-import { ReentrancyGuardTransient } from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 /**
  * @title PufferLocker
@@ -25,10 +25,11 @@ import { ReentrancyGuardTransient } from "@openzeppelin/contracts/utils/Reentran
  * Key features:
  * - Voting power automatically expires when locks expire, without requiring transactions
  * - Multiple locks per user with independent expiration times
- * - Delegation of voting power to other addresses including a Puffer team address
+ * - Delegation of voting power to other addresses
  * - Epoch-based tracking system for potential governance snapshots
+ * - Two-step ownership transfer for enhanced security
  */
-contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, ReentrancyGuardTransient {
+contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
     // ------------------------ ERRORS ------------------------
     error ZeroValue();
     error NoExistingLock();
@@ -38,8 +39,6 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
     error InvalidLockId();
     error TransfersDisabled();
     error InvalidEpoch();
-    error EmergencyUnlockNotEnabled();
-    error NotEnoughActiveLocksForDeletion();
 
     // ------------------------ STRUCTS ------------------------
     struct Lock {
@@ -59,11 +58,8 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
     );
     event Withdraw(address indexed provider, uint256 indexed lockId, uint256 value, uint256 ts);
     event Supply(uint256 prevSupply, uint256 supply);
-    event DelegatedToPufferTeam(address indexed delegator);
     event EpochTransition(uint256 indexed epochId, uint256 timestamp, uint256 totalSupply);
     event EmergencyWithdraw(address indexed user, uint256 amount);
-    event UserRemoved(address indexed user);
-    event EpochCheckpointWarning(uint256 currentProcessedEpoch, uint256 targetEpoch);
     event Relock(
         address indexed provider,
         uint256 indexed lockId,
@@ -74,63 +70,41 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
     );
 
     // ------------------------ STATE VARIABLES ------------------------
-    // Puffer token address is known and constant
-    IERC20 public constant PUFFER = IERC20(0x4d1C297d39C5c1277964D0E3f8Aa901493664530);
-    uint256 public constant MAX_LOCK_TIME = 2 * 365 days; // 2 years
-    uint256 public constant EPOCH_DURATION = 1 weeks;
-    uint256 public constant MAX_CHECKPOINTS_PER_TX = 50; // Maximum checkpoints to process in a single transaction
-    uint256 public constant MAX_PAGINATION_SIZE = 100; // Maximum items to return in paginated functions
-    uint256 public lockedSupply; // Total tokens locked as collateral
-    address public immutable PUFFER_TEAM;
-
-    // Epoch tracking
+    // Puffer token address is set in constructor and immutable
+    IERC20 public immutable PUFFER;
+    uint256 private constant MAX_LOCK_TIME = 2 * 365 days; // 2 years
+    uint256 private constant EPOCH_DURATION = 2 weeks;
+    uint256 public immutable genesisTime; // Time when the contract was deployed (epoch 0)
     uint256 public currentEpoch;
-    mapping(uint256 epochId => uint256 timestamp) public epochTimestamps;
+    uint256 public activeVotingSupply; // Globally active (non-expired) voting supply. Cheap O(1) totalSupply.
+    uint256 public lockedSupply; // Total tokens locked as collateral
 
-    // Time when the contract was deployed (epoch 0)
-    uint256 public immutable genesisTime;
+    // Amount of vlPUFFER that expires at the given epoch id (relative to genesisTime)
+    mapping(uint256 epochId => uint256 amount) private _epochExpiringSupply;
 
-    // User locks and related data
-    mapping(address user => mapping(uint256 lockId => Lock lockData)) public userLocks;
-    mapping(address user => uint256 count) public userLockCount;
-    mapping(address user => uint256 activeCount) public userActiveLockCount;
+    // User locks and related data - changed from mapping to array
+    mapping(address user => Lock[] locks) public userLocks;
     mapping(address user => uint256 balance) public userVlTokenBalance;
-
-    // Array of all users that have created locks
-    address[] private _allUsers;
-    // Mapping to track if an address is already in the _allUsers array
-    mapping(address user => bool isRegistered) private _isUser;
-    // Mapping to track user's index in _allUsers array
-    mapping(address user => uint256 arrayIndex) private _userIndex;
 
     // Use SafeERC20 for token operations
     using SafeERC20 for IERC20;
 
     // ------------------------ CONSTRUCTOR ------------------------
-    constructor(address pufferTeam) ERC20("vlPUFFER", "vlPUFFER") ERC20Permit("vlPUFFER") Ownable(msg.sender) {
-        PUFFER_TEAM = pufferTeam;
+    constructor(address pufferToken) ERC20("vlPUFFER", "vlPUFFER") ERC20Permit("vlPUFFER") Ownable(msg.sender) {
+        PUFFER = IERC20(pufferToken);
         genesisTime = block.timestamp;
-
-        // Initialize epoch 0
-        epochTimestamps[0] = block.timestamp;
-        currentEpoch = 0;
     }
 
     // ------------------------ MODIFIERS ------------------------
-    modifier nonZeroValue(uint256 value) {
-        if (value == 0) revert ZeroValue();
-        _;
-    }
-
     modifier validUnlockTime(uint256 unlockTime) {
-        uint256 alignedUnlockTime = (unlockTime / EPOCH_DURATION) * EPOCH_DURATION;
+        uint256 alignedUnlockTime = _alignToEpoch(unlockTime);
         if (alignedUnlockTime <= block.timestamp) revert FutureLockTimeRequired();
         if (alignedUnlockTime > block.timestamp + MAX_LOCK_TIME) revert ExceedsMaxLockTime();
         _;
     }
 
     modifier validLockId(address user, uint256 lockId) {
-        if (lockId >= userLockCount[user]) revert InvalidLockId();
+        if (lockId >= userLocks[user].length) revert InvalidLockId();
         _;
     }
 
@@ -157,65 +131,43 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
         _unpause();
     }
 
-    /**
-     * @notice Process epoch transitions manually
-     * @dev Used to process transitions when there might be too many epochs to process in a single transaction
-     * @param maxCheckpoints Maximum number of checkpoints to process
-     */
-    function processEpochTransitions(uint256 maxCheckpoints) external onlyOwner {
-        if (maxCheckpoints == 0 || maxCheckpoints > MAX_CHECKPOINTS_PER_TX) {
-            maxCheckpoints = MAX_CHECKPOINTS_PER_TX;
-        }
-
-        _checkpointEpoch(maxCheckpoints);
-    }
-
     // ------------------------ INTERNAL FUNCTIONS ------------------------
+
+    /**
+     * @notice Aligns a timestamp to the nearest epoch boundary
+     * @param timestamp The timestamp to align
+     * @return The timestamp aligned to the epoch boundary
+     */
+    function _alignToEpoch(uint256 timestamp) internal pure returns (uint256) {
+        return (timestamp / EPOCH_DURATION) * EPOCH_DURATION;
+    }
 
     /**
      * @notice Checks if we've moved to a new epoch and updates epoch data
      * @dev This is called automatically before state-changing operations
      */
     function _checkpointEpoch() internal {
-        _checkpointEpoch(MAX_CHECKPOINTS_PER_TX);
-    }
-
-    /**
-     * @notice Checks if we've moved to a new epoch and updates epoch data with a limit on checkpoints
-     * @param maxCheckpoints Maximum number of checkpoints to process
-     */
-    function _checkpointEpoch(uint256 maxCheckpoints) internal {
-        uint256 currentEpochStart = epochTimestamps[currentEpoch];
         uint256 currentTime = block.timestamp;
+        uint256 currentEpochStart = genesisTime + (currentEpoch * EPOCH_DURATION);
 
         // Check if we've moved to a new epoch
         if (currentTime >= currentEpochStart + EPOCH_DURATION) {
             // Calculate how many epochs have passed
             uint256 epochsPassed = (currentTime - currentEpochStart) / EPOCH_DURATION;
 
-            // Limit the number of checkpoints to create
-            uint256 checkpointsToCreate = epochsPassed > maxCheckpoints ? maxCheckpoints : epochsPassed;
-
-            if (checkpointsToCreate == 0) return;
-
             // Create checkpoints for each epoch
-            for (uint256 i = 0; i < checkpointsToCreate; i++) {
-                uint256 newEpoch = currentEpoch + 1;
+            for (uint256 i = 0; i < epochsPassed; i++) {
+                currentEpoch++;
                 uint256 newEpochTime = currentEpochStart + EPOCH_DURATION * (i + 1);
 
-                // Save the checkpoint
-                epochTimestamps[newEpoch] = newEpochTime;
+                // ---- Supply expiration ----
+                uint256 expiringAmount = _epochExpiringSupply[currentEpoch];
+                if (expiringAmount != 0) {
+                    activeVotingSupply -= expiringAmount;
+                    delete _epochExpiringSupply[currentEpoch];
+                }
 
-                emit EpochTransition(newEpoch, newEpochTime, 0);
-
-                // Update the current epoch
-                currentEpoch = newEpoch;
-            }
-
-            // If we've processed the maximum number of checkpoints but there are more epochs to process,
-            // emit a warning that more processing is needed
-            if (checkpointsToCreate < epochsPassed) {
-                emit EpochCheckpointWarning(currentEpoch, currentEpoch + (epochsPassed - checkpointsToCreate));
+                emit EpochTransition(currentEpoch, newEpochTime, activeVotingSupply);
             }
         }
     }
@@ -226,19 +178,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return Total active voting power of the user
      */
     function _calculateActiveBalanceOf(address user) internal view returns (uint256) {
-        uint256 activeBalance = 0;
-        uint256 userLockCount_ = userLockCount[user];
-
-        for (uint256 i = 0; i < userLockCount_; i++) {
-            Lock memory lock = userLocks[user][i];
-
-            // Only count locks that haven't expired
-            if (lock.amount > 0 && block.timestamp < lock.end) {
-                activeBalance += lock.vlTokenAmount;
-            }
-        }
-
-        return activeBalance;
+        return _calculateActiveBalanceOfAt(user, block.timestamp);
     }
 
     /**
@@ -249,10 +189,11 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      */
     function _calculateActiveBalanceOfAt(address user, uint256 timestamp) internal view returns (uint256) {
         uint256 activeBalance = 0;
-        uint256 userLockCount_ = userLockCount[user];
+        Lock[] storage userLocksArray = userLocks[user];
+        uint256 userLockCount = userLocksArray.length;
 
-        for (uint256 i = 0; i < userLockCount_; i++) {
-            Lock memory lock = userLocks[user][i];
+        for (uint256 i = 0; i < userLockCount; i++) {
+            Lock storage lock = userLocksArray[i];
 
             // Only count locks that were active at the specified timestamp
             if (lock.amount > 0 && timestamp < lock.end) {
@@ -264,65 +205,20 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
     }
 
     /**
-     * @notice Calculate total active (non-expired) voting power at the current time
-     * @return Total active voting power across all users
-     */
-    function _calculateTotalActiveSupply() internal view returns (uint256) {
-        uint256 activeSupply = 0;
-        uint256 userCount = _allUsers.length;
-
-        for (uint256 i = 0; i < userCount; i++) {
-            address user = _allUsers[i];
-            activeSupply += _calculateActiveBalanceOf(user);
-        }
-
-        return activeSupply;
-    }
-
-    /**
-     * @notice Calculate total active (non-expired) voting power at a specific timestamp
-     * @param timestamp Timestamp at which to calculate the supply
-     * @return Total active voting power across all users at the specified timestamp
+     * @notice Calculate active voting power at an arbitrary timestamp by
+     *         summing amounts scheduled to expire after that time.
+     * @dev This loops over at most MAX_LOCK_TIME / EPOCH_DURATION (≈52)
+     *      buckets so it is always bounded.
      */
     function _calculateTotalActiveSupplyAt(uint256 timestamp) internal view returns (uint256) {
+        uint256 startEpoch = (timestamp - genesisTime) / EPOCH_DURATION;
+        uint256 maxEpoch = startEpoch + (MAX_LOCK_TIME / EPOCH_DURATION);
+
         uint256 activeSupply = 0;
-        uint256 userCount = _allUsers.length;
-
-        for (uint256 i = 0; i < userCount; i++) {
-            address user = _allUsers[i];
-            activeSupply += _calculateActiveBalanceOfAt(user, timestamp);
+        for (uint256 e = startEpoch + 1; e <= maxEpoch; e++) {
+            activeSupply += _epochExpiringSupply[e];
         }
-
         return activeSupply;
-    }
-
-    /**
-     * @notice Remove a user from the tracking array
-     * @param user Address of the user to remove
-     */
-    function _removeUser(address user) internal {
-        if (!_isUser[user]) return;
-
-        uint256 index = _userIndex[user];
-        uint256 lastIndex = _allUsers.length - 1;
-
-        // Only proceed if the user actually has no active locks
-        if (userActiveLockCount[user] > 0) revert NotEnoughActiveLocksForDeletion();
-
-        // If the user is not the last element, move the last element to their position
-        if (index != lastIndex) {
-            address lastUser = _allUsers[lastIndex];
-            _allUsers[index] = lastUser;
-            _userIndex[lastUser] = index;
-        }
-
-        // Remove the last element
-        _allUsers.pop();
-
-        // Update the user's status
-        _isUser[user] = false;
-
-        emit UserRemoved(user);
     }
 
     /**
@@ -332,7 +228,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return lockId The ID of the newly created lock
      */
     function _createLock(uint256 value, uint256 unlockTime) internal returns (uint256 lockId) {
-        uint256 alignedUnlockTime = (unlockTime / EPOCH_DURATION) * EPOCH_DURATION;
+        uint256 alignedUnlockTime = _alignToEpoch(unlockTime);
 
         // Calculate number of epochs
         uint256 numEpochs = (alignedUnlockTime - block.timestamp) / EPOCH_DURATION;
@@ -340,24 +236,20 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
         // Calculate vlToken amount
         uint256 vlTokenAmount = value * numEpochs;
 
-        // Get next lock ID
-        lockId = userLockCount[msg.sender]++;
-
         // Create the lock
         Lock memory newLock = Lock({ amount: value, end: alignedUnlockTime, vlTokenAmount: vlTokenAmount });
 
-        userLocks[msg.sender][lockId] = newLock;
-        userActiveLockCount[msg.sender]++;
+        // Add to user's locks array and get lock ID
+        userLocks[msg.sender].push(newLock);
+        lockId = userLocks[msg.sender].length - 1;
 
         // Update user's vlToken balance
         userVlTokenBalance[msg.sender] += vlTokenAmount;
 
-        // Add user to _allUsers array if not already added
-        if (!_isUser[msg.sender]) {
-            _userIndex[msg.sender] = _allUsers.length;
-            _allUsers.push(msg.sender);
-            _isUser[msg.sender] = true;
-        }
+        // ---- Epoch supply tracking ----
+        uint256 endEpochId = (alignedUnlockTime - genesisTime) / EPOCH_DURATION;
+        _epochExpiringSupply[endEpochId] += vlTokenAmount;
+        activeVotingSupply += vlTokenAmount;
 
         // Update locked supply
         uint256 supplyBefore = lockedSupply;
@@ -378,7 +270,55 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
         return lockId;
     }
 
-    // ------------------------ PUBLIC / EXTERNAL FUNCTIONS ------------------------
+    /**
+     * @notice Internal helper function to execute common withdrawal logic
+     * @param lockId The ID of the lock to withdraw from
+     * @param lock The lock storage reference
+     * @return value The amount of PUFFER tokens withdrawn
+     */
+    function _executeWithdrawal(uint256 lockId, Lock storage lock) private returns (uint256 value) {
+        value = lock.amount;
+        uint256 vlTokenValue = lock.vlTokenAmount;
+
+        // Update user's vlToken balance
+        userVlTokenBalance[msg.sender] -= vlTokenValue;
+
+        // Update locked supply
+        uint256 supplyBefore = lockedSupply;
+        lockedSupply = supplyBefore - value;
+
+        // Burn vlTokens
+        _burn(msg.sender, vlTokenValue);
+
+        // Transfer PUFFER tokens back to user using SafeERC20
+        PUFFER.safeTransfer(msg.sender, value);
+
+        // Optimize the array by moving the last element to the position of the deleted lock
+        uint256 lastLockIndex = userLocks[msg.sender].length - 1;
+        if (lockId != lastLockIndex) {
+            userLocks[msg.sender][lockId] = userLocks[msg.sender][lastLockIndex];
+        }
+        userLocks[msg.sender].pop();
+
+        emit Supply(supplyBefore, lockedSupply);
+    }
+
+    /**
+     * @dev Override the _update function to disable transfers of vlPUFFER tokens.
+     * vlPUFFER tokens represent specific locks and cannot be transferred as they
+     * are tied to the user's locked PUFFER tokens.
+     */
+    function _update(address from, address to, uint256 amount) internal override(ERC20, ERC20Votes) {
+        // Allow minting (from = address(0)) and burning (to = address(0))
+        if (from == address(0) || to == address(0)) {
+            super._update(from, to, amount);
+        } else {
+            // Block transfers between users
+            revert TransfersDisabled();
+        }
+    }
+
+    // ------------------------ EXTERNAL & PUBLIC FUNCTIONS ------------------------
 
     /**
      * @notice Create a new lock by depositing `value` tokens until `unlockTime`.
@@ -388,12 +328,12 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      */
     function createLock(uint256 value, uint256 unlockTime)
         external
-        nonReentrant
         whenNotPaused
-        nonZeroValue(value)
         validUnlockTime(unlockTime)
         returns (uint256 lockId)
     {
+        if (value == 0) revert ZeroValue();
+
         // Update epoch if needed
         _checkpointEpoch();
 
@@ -416,12 +356,12 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      */
     function createLockWithPermit(uint256 value, uint256 unlockTime, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         external
-        nonReentrant
         whenNotPaused
-        nonZeroValue(value)
         validUnlockTime(unlockTime)
         returns (uint256 lockId)
     {
+        if (value == 0) revert ZeroValue();
+
         // Update epoch if needed
         _checkpointEpoch();
 
@@ -442,7 +382,6 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      */
     function relockExpiredLock(uint256 lockId, uint256 unlockTime)
         external
-        nonReentrant
         whenNotPaused
         validLockId(msg.sender, lockId)
         validUnlockTime(unlockTime)
@@ -458,9 +397,8 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
         uint256 amount = lock.amount;
         uint256 oldVlTokenAmount = lock.vlTokenAmount;
 
-        uint256 alignedUnlockTime = (unlockTime / EPOCH_DURATION) * EPOCH_DURATION;
-
-        // Calculate number of epochs for the new lock
+        // Align unlock time to epoch boundary and calculate epochs
+        uint256 alignedUnlockTime = _alignToEpoch(unlockTime);
         uint256 numEpochs = (alignedUnlockTime - block.timestamp) / EPOCH_DURATION;
 
         // Calculate new vlToken amount
@@ -472,6 +410,15 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
 
         // Update user's vlToken balance
         userVlTokenBalance[msg.sender] = userVlTokenBalance[msg.sender] - oldVlTokenAmount + newVlTokenAmount;
+
+        // ---- Epoch supply tracking ----
+        // Note: lock.end is updated later, so store old end epoch prior
+        uint256 newEndEpochId = (alignedUnlockTime - genesisTime) / EPOCH_DURATION;
+
+        // Only add the new voting power because the old one has already expired and
+        // was removed from activeVotingSupply when its epoch passed.
+        _epochExpiringSupply[newEndEpochId] += newVlTokenAmount;
+        activeVotingSupply += newVlTokenAmount;
 
         // Mint new voting power tokens
         _mint(msg.sender, newVlTokenAmount);
@@ -487,93 +434,34 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @notice Withdraw tokens from an expired lock
      * @param lockId The ID of the lock to withdraw from
      */
-    function withdraw(uint256 lockId) external nonReentrant whenNotPaused validLockId(msg.sender, lockId) {
+    function withdraw(uint256 lockId) external whenNotPaused validLockId(msg.sender, lockId) {
         // Update epoch if needed
         _checkpointEpoch();
 
-        // Get lock data in memory instead of storage reference
-        Lock memory lock = userLocks[msg.sender][lockId];
+        Lock storage lock = userLocks[msg.sender][lockId];
 
         if (lock.amount == 0) revert NoExistingLock();
         if (block.timestamp < lock.end) revert LockNotExpired();
 
-        uint256 value = lock.amount;
-        uint256 vlTokenValue = lock.vlTokenAmount;
-
-        // Reset the lock using delete (more gas efficient than setting each field to 0)
-        delete userLocks[msg.sender][lockId];
-
-        // Update user's vlToken balance and active lock count
-        userVlTokenBalance[msg.sender] -= vlTokenValue;
-        userActiveLockCount[msg.sender]--;
-
-        // If user has no more active locks, remove from tracking
-        if (userActiveLockCount[msg.sender] == 0) {
-            _removeUser(msg.sender);
-        }
-
-        // Update locked supply
-        uint256 supplyBefore = lockedSupply;
-        lockedSupply = supplyBefore - value;
-
-        // Burn vlTokens (note: voting power might already be 0 due to expiry)
-        _burn(msg.sender, vlTokenValue);
-
-        // Transfer PUFFER tokens back to user using SafeERC20
-        PUFFER.safeTransfer(msg.sender, value);
+        // Execute the common withdrawal logic and get the withdrawn amount
+        uint256 value = _executeWithdrawal(lockId, lock);
 
         emit Withdraw(msg.sender, lockId, value, block.timestamp);
-        emit Supply(supplyBefore, lockedSupply);
     }
 
     /**
      * @notice Emergency withdraw function that works even during shutdown
      * @param lockId The ID of the lock to withdraw from
      */
-    function emergencyWithdraw(uint256 lockId) external nonReentrant validLockId(msg.sender, lockId) {
-        // This function can be used even when the contract is paused
-        if (!paused()) revert EmergencyUnlockNotEnabled();
-
-        // Get lock data in memory instead of storage reference
-        Lock memory lock = userLocks[msg.sender][lockId];
+    function emergencyWithdraw(uint256 lockId) external whenPaused validLockId(msg.sender, lockId) {
+        Lock storage lock = userLocks[msg.sender][lockId];
 
         if (lock.amount == 0) revert NoExistingLock();
 
-        uint256 value = lock.amount;
-        uint256 vlTokenValue = lock.vlTokenAmount;
-
-        // Reset the lock using delete (more gas efficient than setting each field to 0)
-        delete userLocks[msg.sender][lockId];
-
-        // Update user's vlToken balance and active lock count
-        userVlTokenBalance[msg.sender] -= vlTokenValue;
-        userActiveLockCount[msg.sender]--;
-
-        // If user has no more active locks, remove from tracking
-        if (userActiveLockCount[msg.sender] == 0) {
-            _removeUser(msg.sender);
-        }
-
-        // Update locked supply
-        uint256 supplyBefore = lockedSupply;
-        lockedSupply = supplyBefore - value;
-
-        // Burn vlTokens
-        _burn(msg.sender, vlTokenValue);
-
-        // Transfer PUFFER tokens back to user using SafeERC20
-        PUFFER.safeTransfer(msg.sender, value);
+        // Execute the common withdrawal logic and get the withdrawn amount
+        uint256 value = _executeWithdrawal(lockId, lock);
 
         emit EmergencyWithdraw(msg.sender, value);
-        emit Supply(supplyBefore, lockedSupply);
-    }
-
-    /**
-     * @notice Delegate voting power to the Puffer team
-     */
-    function delegateToPufferTeam() external whenNotPaused {
-        _delegate(msg.sender, PUFFER_TEAM);
-        emit DelegatedToPufferTeam(msg.sender);
     }
 
     /**
@@ -592,66 +480,18 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return Number of locks created by the user
      */
     function getLockCount(address user) external view returns (uint256) {
-        return userLockCount[user];
+        return userLocks[user].length;
     }
 
     /**
-     * @notice Get the total number of active locks for a user
-     * @param user Address of the user
-     * @return Number of active locks for the user
-     */
-    function getActiveLockCount(address user) external view returns (uint256) {
-        return userActiveLockCount[user];
-    }
-
-    /**
-     * @notice Get locks for a user with pagination
-     * @param user Address of the user
-     * @param offset Starting index for pagination
-     * @param limit Maximum number of locks to return
-     * @return Array of Lock structs for the user
-     */
-    function getLocks(address user, uint256 offset, uint256 limit) external view returns (Lock[] memory) {
-        uint256 count = userLockCount[user];
-
-        if (offset >= count) {
-            return new Lock[](0);
-        }
-
-        // Limit to MAX_PAGINATION_SIZE
-        if (limit > MAX_PAGINATION_SIZE) {
-            limit = MAX_PAGINATION_SIZE;
-        }
-
-        // Adjust limit if it would exceed available locks
-        uint256 available = count - offset;
-        limit = limit > available ? available : limit;
-
-        Lock[] memory locks = new Lock[](limit);
-
-        for (uint256 i = 0; i < limit; i++) {
-            locks[i] = userLocks[user][offset + i];
-        }
-
-        return locks;
-    }
-
-    /**
-     * @notice Get all locks for a user (for backward compatibility, may hit gas limits for users with many locks)
+     * @notice Get all locks for a user
      * @param user Address of the user
      * @return Array of Lock structs for the user
      */
     function getAllLocks(address user) external view returns (Lock[] memory) {
-        uint256 count = userLockCount[user];
-        Lock[] memory locks = new Lock[](count);
-
-        for (uint256 i = 0; i < count; i++) {
-            locks[i] = userLocks[user][i];
-        }
-
-        return locks;
+        return userLocks[user];
     }
-
+    
     /**
      * @notice Get current total locked supply (collateral tokens)
      * @return Total amount of PUFFER tokens locked in the contract
@@ -661,59 +501,18 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
     }
 
     /**
-     * @notice Get expired locks for a user with pagination
-     * @param user Address of the user
-     * @param offset Starting index for pagination
-     * @param limit Maximum number of lock IDs to return
-     * @return Array of lock IDs that have expired but not yet withdrawn
-     */
-    function getExpiredLocks(address user, uint256 offset, uint256 limit) external view returns (uint256[] memory) {
-        uint256 count = userLockCount[user];
-
-        if (offset >= count) {
-            return new uint256[](0);
-        }
-
-        // Limit to MAX_PAGINATION_SIZE
-        if (limit > MAX_PAGINATION_SIZE) {
-            limit = MAX_PAGINATION_SIZE;
-        }
-
-        // First pass to count expired locks
-        uint256 expiredCount = 0;
-        for (uint256 i = offset; i < count && i < offset + limit; i++) {
-            Lock memory lock = userLocks[user][i];
-            if (lock.amount > 0 && block.timestamp >= lock.end) {
-                expiredCount++;
-            }
-        }
-
-        // Second pass to fill the array
-        uint256[] memory expiredLockIds = new uint256[](expiredCount);
-        uint256 index = 0;
-        for (uint256 i = offset; i < count && i < offset + limit; i++) {
-            Lock memory lock = userLocks[user][i];
-            if (lock.amount > 0 && block.timestamp >= lock.end) {
-                expiredLockIds[index] = i;
-                index++;
-            }
-        }
-
-        return expiredLockIds;
-    }
-
-    /**
-     * @notice Get all expired locks for a user (for backward compatibility)
+     * @notice Get all expired locks for a user
      * @param user Address of the user
      * @return Array of lock IDs that have expired but not yet withdrawn
      */
     function getExpiredLocks(address user) external view returns (uint256[] memory) {
-        uint256 count = userLockCount[user];
+        Lock[] storage userLocksArray = userLocks[user];
+        uint256 count = userLocksArray.length;
         uint256[] memory expiredLockIds = new uint256[](count);
         uint256 expiredCount = 0;
 
         for (uint256 i = 0; i < count; i++) {
-            Lock memory lock = userLocks[user][i];
+            Lock storage lock = userLocksArray[i];
             if (lock.amount > 0 && block.timestamp >= lock.end) {
                 expiredLockIds[expiredCount] = i;
                 expiredCount++;
@@ -730,11 +529,10 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
 
     /**
      * @notice Calculate the current epoch number
-     * @return Current epoch number based on time passed since contract deployment
+     * @return epoch Current epoch number based on time passed since contract deployment
      */
-    function getCurrentEpoch() public view returns (uint256) {
-        uint256 epochsPassed = (block.timestamp - genesisTime) / EPOCH_DURATION;
-        return epochsPassed;
+    function getCurrentEpoch() public view returns (uint256 epoch) {
+        epoch = (block.timestamp - genesisTime) / EPOCH_DURATION;
     }
 
     /**
@@ -743,7 +541,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return Timestamp when the epoch starts
      */
     function getEpochTimestamp(uint256 epoch) public view validEpoch(epoch) returns (uint256) {
-        return epochTimestamps[epoch] > 0 ? epochTimestamps[epoch] : genesisTime + (epoch * EPOCH_DURATION);
+        return genesisTime + (epoch * EPOCH_DURATION);
     }
 
     /**
@@ -752,10 +550,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return Active voting power of the account
      */
     function balanceOf(address account) public view override returns (uint256) {
-        // Using the standard ERC20 balanceOf first
-        uint256 rawBalance = super.balanceOf(account);
-
-        if (rawBalance == 0) {
+        if (super.balanceOf(account) == 0) {
             return 0;
         }
 
@@ -768,15 +563,12 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return Total active voting power across all users
      */
     function totalSupply() public view override returns (uint256) {
-        // Using the standard ERC20 totalSupply first
-        uint256 rawSupply = super.totalSupply();
-
-        if (rawSupply == 0) {
+        if (super.totalSupply() == 0) {
             return 0;
         }
 
         // Calculate only the active portion
-        return _calculateTotalActiveSupply();
+        return _calculateTotalActiveSupplyAt(block.timestamp);
     }
 
     /**
@@ -786,8 +578,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return Active voting power of the account at the specified epoch
      */
     function balanceOfAtEpoch(address account, uint256 epoch) public view validEpoch(epoch) returns (uint256) {
-        uint256 timestamp = getEpochTimestamp(epoch);
-        return _calculateActiveBalanceOfAt(account, timestamp);
+        return _calculateActiveBalanceOfAt(account, getEpochTimestamp(epoch));
     }
 
     /**
@@ -796,8 +587,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
      * @return Total active voting power across all users at the specified epoch
      */
     function totalSupplyAtEpoch(uint256 epoch) public view validEpoch(epoch) returns (uint256) {
-        uint256 timestamp = getEpochTimestamp(epoch);
-        return _calculateTotalActiveSupplyAt(timestamp);
+        return _calculateTotalActiveSupplyAt(getEpochTimestamp(epoch));
     }
 
     /**
@@ -809,30 +599,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable, Pausable, Reen
         return super.balanceOf(account);
     }
 
-    /**
-     * @notice Get the total number of users that have created locks
-     * @return Total number of users
-     */
-    function getTotalUsers() external view returns (uint256) {
-        return _allUsers.length;
-    }
-
     // ------------------------ OVERRIDES REQUIRED BY SOLIDITY ------------------------
-
-    /**
-     * @dev Override the _update function to disable transfers of vlPUFFER tokens.
-     * vlPUFFER tokens represent specific locks and cannot be transferred as they
-     * are tied to the user's locked PUFFER tokens.
-     */
-    function _update(address from, address to, uint256 amount) internal override(ERC20, ERC20Votes) {
-        // Allow minting (from = address(0)) and burning (to = address(0))
-        if (from == address(0) || to == address(0)) {
-            super._update(from, to, amount);
-        } else {
-            // Block transfers between users
-            revert TransfersDisabled();
-        }
-    }
 
     function nonces(address owner) public view virtual override(ERC20Permit, Nonces) returns (uint256) {
         return super.nonces(owner);

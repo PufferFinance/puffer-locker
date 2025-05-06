@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 # PufferLocker
 
 PufferLocker is a production-grade Solidity contract implementing a token voting system for Puffer tokens, compatible with OpenZeppelin's ERC20Votes. The system enables users to lock Puffer tokens for a specified duration to receive proportional voting power.
@@ -7,7 +8,7 @@ PufferLocker is a production-grade Solidity contract implementing a token voting
 - **Epoch-Based Voting Power**: Voting power is allocated based on locked token amount × lock duration in weeks
 - **Multiple Locks**: Users can have multiple independent locks with different expiration times
 - **No Decay, Full Expiry**: Voting power remains constant during the lock period and expires completely at the end
-- **Delegation**: Users can delegate their voting power to other addresses, including a specific Puffer team address
+- **Delegation**: Users can delegate their voting power to other addresses
 - **Non-transferable**: vlPUFFER tokens represent staked positions and cannot be transferred
 - **History Tracking**: Epoch-based system allows querying historical voting power
 - **Pausable**: Includes standard OpenZeppelin Pausable functionality with emergency withdrawals
@@ -49,9 +50,6 @@ function withdraw(uint256 _lockId) external;
 
 // Relock tokens from an expired lock for a new duration
 function relockExpiredLock(uint256 _lockId, uint256 _unlockTime) external returns (bool);
-
-// Delegate voting power to the Puffer team
-function delegateToPufferTeam() external;
 
 // Get active (unexpired) voting power
 function balanceOf(address account) public view returns (uint256);
@@ -108,11 +106,11 @@ forge script script/Deploy.s.sol:DeployPufferLocker \
 
 #### Custom Parameter Deployment
 
-For deploying with custom token and team addresses:
+For deploying with a custom token address:
 
 ```bash
 forge script script/Deploy.s.sol:DeployPufferLockerWithCustomParams \
-  --sig "run(address)" $PUFFER_TEAM_ADDRESS \
+  --sig "run(address)" $PUFFER_TOKEN_ADDRESS \
   --rpc-url $RPC_URL \
   --private-key $PRIVATE_KEY \
   --broadcast \
