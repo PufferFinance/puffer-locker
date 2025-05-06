@@ -6,11 +6,11 @@ import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
-import { ERC20Votes } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
 import { IERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Nonces } from "@openzeppelin/contracts/utils/Nonces.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
+import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title PufferLocker
@@ -29,7 +29,7 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
  * - Epoch-based tracking system for potential governance snapshots
  * - Two-step ownership transfer for enhanced security
  */
-contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
+contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
     // ------------------------ ERRORS ------------------------
     error ZeroValue();
     error NoExistingLock();
@@ -39,6 +39,7 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable 
     error InvalidLockId();
     error TransfersDisabled();
     error InvalidEpoch();
+    error InvalidSignature();
 
     // ------------------------ STRUCTS ------------------------
     struct Lock {
@@ -68,6 +69,8 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable 
         uint256 newVlTokenAmount,
         uint256 ts
     );
+    event DelegateChanged(address indexed delegator, address indexed fromDelegate, address indexed toDelegate);
+    event DelegateVotesChanged(address indexed delegate, uint256 previousBalance, uint256 newBalance);
 
     // ------------------------ STATE VARIABLES ------------------------
     // Puffer token address is set in constructor and immutable
@@ -85,6 +88,14 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable 
     // User locks and related data - changed from mapping to array
     mapping(address user => Lock[] locks) public userLocks;
     mapping(address user => uint256 balance) public userVlTokenBalance;
+
+    // Delegation related mappings
+    mapping(address delegator => address delegate) private _delegates;
+    mapping(address delegatee => uint256 delegatedVotes) private _delegatedVotes;
+
+    // EIP-712 typehash for delegation
+    bytes32 private constant _DELEGATION_TYPEHASH = 
+        keccak256("Delegation(address delegatee,uint256 nonce,uint256 expiry)");
 
     // Use SafeERC20 for token operations
     using SafeERC20 for IERC20;
@@ -308,13 +319,61 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable 
      * vlPUFFER tokens represent specific locks and cannot be transferred as they
      * are tied to the user's locked PUFFER tokens.
      */
-    function _update(address from, address to, uint256 amount) internal override(ERC20, ERC20Votes) {
+    function _update(address from, address to, uint256 amount) internal override(ERC20) {
         // Allow minting (from = address(0)) and burning (to = address(0))
         if (from == address(0) || to == address(0)) {
             super._update(from, to, amount);
+
+            // Update delegated votes
+            if (from != address(0)) {
+                address delegatee = delegates(from);
+                if (delegatee != address(0)) {
+                    uint256 oldDelegatedVotes = _delegatedVotes[delegatee];
+                    uint256 activeAmount = _calculateActiveBalanceOf(from);
+                    uint256 newDelegatedVotes = oldDelegatedVotes > amount ? oldDelegatedVotes - amount : 0;
+                    _delegatedVotes[delegatee] = newDelegatedVotes;
+                    
+                    emit DelegateVotesChanged(delegatee, oldDelegatedVotes, newDelegatedVotes);
+                }
+            }
+            
+            if (to != address(0)) {
+                address delegatee = delegates(to);
+                if (delegatee != address(0)) {
+                    uint256 oldDelegatedVotes = _delegatedVotes[delegatee];
+                    uint256 newDelegatedVotes = oldDelegatedVotes + amount;
+                    _delegatedVotes[delegatee] = newDelegatedVotes;
+                    
+                    emit DelegateVotesChanged(delegatee, oldDelegatedVotes, newDelegatedVotes);
+                }
+            }
         } else {
             // Block transfers between users
             revert TransfersDisabled();
+        }
+    }
+
+    /**
+     * @notice Change the delegate for a delegator
+     * @param delegator The address to delegate from
+     * @param delegatee The address to delegate to
+     */
+    function _delegate(address delegator, address delegatee) internal {
+        address currentDelegate = delegates(delegator);
+        uint256 activeBalance = getVotes(delegator);
+        _delegates[delegator] = delegatee;
+
+        emit DelegateChanged(delegator, currentDelegate, delegatee);
+
+        // Update delegated votes
+        if (currentDelegate != address(0)) {
+            _delegatedVotes[currentDelegate] -= activeBalance;
+            emit DelegateVotesChanged(currentDelegate, _delegatedVotes[currentDelegate] + activeBalance, _delegatedVotes[currentDelegate]);
+        }
+
+        if (delegatee != address(0)) {
+            _delegatedVotes[delegatee] += activeBalance;
+            emit DelegateVotesChanged(delegatee, _delegatedVotes[delegatee] - activeBalance, _delegatedVotes[delegatee]);
         }
     }
 
@@ -599,17 +658,80 @@ contract PufferLocker is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable 
         return super.balanceOf(account);
     }
 
-    // ------------------------ OVERRIDES REQUIRED BY SOLIDITY ------------------------
+    // ------------------------ DELEGATION METHODS FOR ERC20VOTES COMPATIBILITY ------------------------
 
-    function nonces(address owner) public view virtual override(ERC20Permit, Nonces) returns (uint256) {
-        return super.nonces(owner);
+    /**
+     * @notice Get the address that `account` has delegated to
+     * @param account The address to get the delegatee for
+     * @return The address the votes are delegated to
+     */
+    function delegates(address account) public view returns (address) {
+        return _delegates[account];
     }
 
-    function clock() public view override returns (uint48) {
-        return uint48(block.timestamp);
+    /**
+     * @notice Delegate all of the sender's voting power to `delegatee`
+     * @param delegatee The address to delegate votes to
+     */
+    function delegate(address delegatee) public {
+        _delegate(msg.sender, delegatee);
     }
 
-    function CLOCK_MODE() public pure override returns (string memory) {
-        return "mode=timestamp";
+    /**
+     * @notice Delegates votes from signer to `delegatee`
+     * @param delegatee The address to delegate votes to
+     * @param nonce The signature nonce
+     * @param expiry The time at which to expire the signature
+     * @param v Signature's recovery byte
+     * @param r Signature's r value
+     * @param s Signature's s value
+     */
+    function delegateBySig(address delegatee, uint256 nonce, uint256 expiry, uint8 v, bytes32 r, bytes32 s) public {
+        if (block.timestamp > expiry) revert InvalidSignature();
+        
+        bytes32 structHash = keccak256(abi.encode(_DELEGATION_TYPEHASH, delegatee, nonce, expiry));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparatorV4(), structHash));
+        address signer = ECDSA.recover(digest, v, r, s);
+        
+        if (nonce != nonces(signer)) revert InvalidSignature();
+        
+        _useNonce(signer);
+        _delegate(signer, delegatee);
+    }
+
+    /**
+     * @notice Gets the current votes balance for `account`
+     * @param account The address to get votes balance
+     * @return The number of current votes for `account`
+     */
+    function getVotes(address account) public view returns (uint256) {
+        return balanceOf(account);
+    }
+
+    /**
+     * @notice Retrieve the number of votes for `account` at the end of `epoch`
+     * @param account The address to get votes balance
+     * @param epoch The epoch to get votes balance at
+     * @return The number of votes the account had at the specified epoch
+     */
+    function getPastVotes(address account, uint256 epoch) public view validEpoch(epoch) returns (uint256) {
+        return balanceOfAtEpoch(account, epoch);
+    }
+
+    /**
+     * @notice Retrieve the total supply of votes at the end of `epoch`
+     * @param epoch The epoch to retrieve the total supply at
+     * @return The total supply at the specified epoch
+     */
+    function getPastTotalSupply(uint256 epoch) public view validEpoch(epoch) returns (uint256) {
+        return totalSupplyAtEpoch(epoch);
+    }
+
+    /**
+     * @notice Returns the current voting power of all accounts
+     * @return The total voting power 
+     */
+    function getTotalVotes() public view returns (uint256) {
+        return totalSupply();
     }
 }
