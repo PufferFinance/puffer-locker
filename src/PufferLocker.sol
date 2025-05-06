@@ -11,6 +11,7 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { Nonces } from "@openzeppelin/contracts/utils/Nonces.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title PufferLocker
@@ -44,8 +45,21 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
     // ------------------------ STRUCTS ------------------------
     struct Lock {
         uint256 amount; // Amount of PUFFER tokens locked
+        uint256 start; // Timestamp when the lock was created
         uint256 end; // Timestamp when the lock expires
         uint256 vlTokenAmount; // Amount of vlPUFFER tokens minted for this lock
+    }
+
+    // Checkpoint for tracking delegation changes
+    struct Checkpoint {
+        uint256 epochId;
+        address delegate;
+    }
+
+    // Checkpoint for tracking voting power
+    struct VotingPowerCheckpoint {
+        uint256 epochId;
+        uint256 votingPower;
     }
 
     // ------------------------ EVENTS ------------------------
@@ -90,15 +104,16 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
     mapping(address user => uint256 balance) public userVlTokenBalance;
 
     // Delegation related mappings
-    mapping(address delegator => address delegate) private _delegates;
-    mapping(address delegatee => uint256 delegatedVotes) private _delegatedVotes;
+    mapping(address delegator => Checkpoint[] checkpoints) private _delegateCheckpoints;
+    mapping(address delegatee => VotingPowerCheckpoint[] checkpoints) private _votingPowerCheckpoints;
 
     // EIP-712 typehash for delegation
-    bytes32 private constant _DELEGATION_TYPEHASH = 
+    bytes32 private constant _DELEGATION_TYPEHASH =
         keccak256("Delegation(address delegatee,uint256 nonce,uint256 expiry)");
 
     // Use SafeERC20 for token operations
     using SafeERC20 for IERC20;
+    using Math for uint256;
 
     // ------------------------ CONSTRUCTOR ------------------------
     constructor(address pufferToken) ERC20("vlPUFFER", "vlPUFFER") ERC20Permit("vlPUFFER") Ownable(msg.sender) {
@@ -207,7 +222,8 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
             Lock storage lock = userLocksArray[i];
 
             // Only count locks that were active at the specified timestamp
-            if (lock.amount > 0 && timestamp < lock.end) {
+            // (created before timestamp and not yet expired)
+            if (lock.amount > 0 && timestamp < lock.end && lock.start <= timestamp) {
                 activeBalance += lock.vlTokenAmount;
             }
         }
@@ -247,8 +263,13 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
         // Calculate vlToken amount
         uint256 vlTokenAmount = value * numEpochs;
 
-        // Create the lock
-        Lock memory newLock = Lock({ amount: value, end: alignedUnlockTime, vlTokenAmount: vlTokenAmount });
+        // Create the lock with current timestamp
+        Lock memory newLock = Lock({
+            amount: value,
+            start: _alignToEpoch(block.timestamp),
+            end: alignedUnlockTime,
+            vlTokenAmount: vlTokenAmount
+        });
 
         // Add to user's locks array and get lock ID
         userLocks[msg.sender].push(newLock);
@@ -271,7 +292,7 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
 
         // If this is the first mint and the user hasn't delegated yet,
         // delegate to themselves by default
-        if (delegates(msg.sender) == address(0)) {
+        if (_delegateOf(msg.sender, currentEpoch) == address(0)) {
             _delegate(msg.sender, msg.sender);
         }
 
@@ -323,33 +344,103 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
         // Allow minting (from = address(0)) and burning (to = address(0))
         if (from == address(0) || to == address(0)) {
             super._update(from, to, amount);
-
-            // Update delegated votes
-            if (from != address(0)) {
-                address delegatee = delegates(from);
-                if (delegatee != address(0)) {
-                    uint256 oldDelegatedVotes = _delegatedVotes[delegatee];
-                    uint256 activeAmount = _calculateActiveBalanceOf(from);
-                    uint256 newDelegatedVotes = oldDelegatedVotes > amount ? oldDelegatedVotes - amount : 0;
-                    _delegatedVotes[delegatee] = newDelegatedVotes;
-                    
-                    emit DelegateVotesChanged(delegatee, oldDelegatedVotes, newDelegatedVotes);
-                }
-            }
-            
-            if (to != address(0)) {
-                address delegatee = delegates(to);
-                if (delegatee != address(0)) {
-                    uint256 oldDelegatedVotes = _delegatedVotes[delegatee];
-                    uint256 newDelegatedVotes = oldDelegatedVotes + amount;
-                    _delegatedVotes[delegatee] = newDelegatedVotes;
-                    
-                    emit DelegateVotesChanged(delegatee, oldDelegatedVotes, newDelegatedVotes);
-                }
-            }
         } else {
             // Block transfers between users
             revert TransfersDisabled();
+        }
+    }
+
+    /**
+     * @notice Get the checkpoint for a delegator at a specific epoch
+     * @param delegator The delegator address
+     * @param epochId The epoch to lookup
+     * @return The delegate address at that epoch
+     */
+    function _delegateOf(address delegator, uint256 epochId) internal view returns (address) {
+        Checkpoint[] storage checkpoints = _delegateCheckpoints[delegator];
+
+        if (checkpoints.length == 0) {
+            return address(0);
+        }
+
+        // Binary search to find the appropriate checkpoint
+        uint256 low = 0;
+        uint256 high = checkpoints.length - 1;
+
+        while (low < high) {
+            uint256 mid = (low + high + 1) / 2;
+            if (checkpoints[mid].epochId <= epochId) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        return checkpoints[low].epochId <= epochId ? checkpoints[low].delegate : address(0);
+    }
+
+    /**
+     * @notice Get the voting power of a delegatee at a specific epoch
+     * @param delegatee The delegatee address
+     * @param epochId The epoch to lookup
+     * @return The voting power at that epoch
+     */
+    function _votingPowerOf(address delegatee, uint256 epochId) internal view returns (uint256) {
+        VotingPowerCheckpoint[] storage checkpoints = _votingPowerCheckpoints[delegatee];
+
+        if (checkpoints.length == 0) {
+            return 0;
+        }
+
+        // Binary search to find the appropriate checkpoint
+        uint256 low = 0;
+        uint256 high = checkpoints.length - 1;
+
+        while (low < high) {
+            uint256 mid = (low + high + 1) / 2;
+            if (checkpoints[mid].epochId <= epochId) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        return checkpoints[low].epochId <= epochId ? checkpoints[low].votingPower : 0;
+    }
+
+    /**
+     * @notice Add a checkpoint for delegation change
+     * @param delegator The delegator address
+     * @param epochId The epoch when the change happened
+     * @param delegatee The new delegatee
+     */
+    function _writeCheckpoint(address delegator, uint256 epochId, address delegatee) internal {
+        Checkpoint[] storage checkpoints = _delegateCheckpoints[delegator];
+
+        if (checkpoints.length > 0 && checkpoints[checkpoints.length - 1].epochId == epochId) {
+            // If we already have a checkpoint for this epoch, just update it
+            checkpoints[checkpoints.length - 1].delegate = delegatee;
+        } else {
+            // Otherwise create a new checkpoint
+            checkpoints.push(Checkpoint({ epochId: epochId, delegate: delegatee }));
+        }
+    }
+
+    /**
+     * @notice Add a checkpoint for voting power change
+     * @param delegatee The delegatee address
+     * @param epochId The epoch when the change happened
+     * @param votingPower The new voting power
+     */
+    function _writeVotingPowerCheckpoint(address delegatee, uint256 epochId, uint256 votingPower) internal {
+        VotingPowerCheckpoint[] storage checkpoints = _votingPowerCheckpoints[delegatee];
+
+        if (checkpoints.length > 0 && checkpoints[checkpoints.length - 1].epochId == epochId) {
+            // If we already have a checkpoint for this epoch, just update it
+            checkpoints[checkpoints.length - 1].votingPower = votingPower;
+        } else {
+            // Otherwise create a new checkpoint
+            checkpoints.push(VotingPowerCheckpoint({ epochId: epochId, votingPower: votingPower }));
         }
     }
 
@@ -359,21 +450,40 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
      * @param delegatee The address to delegate to
      */
     function _delegate(address delegator, address delegatee) internal {
-        address currentDelegate = delegates(delegator);
-        uint256 activeBalance = getVotes(delegator);
-        _delegates[delegator] = delegatee;
+        // Get the current epoch for the checkpoint
+        uint256 epochId = currentEpoch;
+        address currentDelegate = _delegateOf(delegator, epochId);
+
+        // Record the delegation change
+        _writeCheckpoint(delegator, epochId, delegatee);
 
         emit DelegateChanged(delegator, currentDelegate, delegatee);
 
-        // Update delegated votes
-        if (currentDelegate != address(0)) {
-            _delegatedVotes[currentDelegate] -= activeBalance;
-            emit DelegateVotesChanged(currentDelegate, _delegatedVotes[currentDelegate] + activeBalance, _delegatedVotes[currentDelegate]);
+        // Calculate the current active balance of the delegator
+        uint256 delegatorBalance = balanceOf(delegator);
+
+        // Skip delegation updates if balance is 0
+        if (delegatorBalance == 0) return;
+
+        // Remove votes from current delegate (if not self and not zero)
+        if (currentDelegate != address(0) && currentDelegate != delegator) {
+            uint256 currentDelegateVotes = _votingPowerOf(currentDelegate, epochId);
+            uint256 newDelegateVotes =
+                currentDelegateVotes > delegatorBalance ? currentDelegateVotes - delegatorBalance : 0;
+
+            _writeVotingPowerCheckpoint(currentDelegate, epochId, newDelegateVotes);
+
+            emit DelegateVotesChanged(currentDelegate, currentDelegateVotes, newDelegateVotes);
         }
 
-        if (delegatee != address(0)) {
-            _delegatedVotes[delegatee] += activeBalance;
-            emit DelegateVotesChanged(delegatee, _delegatedVotes[delegatee] - activeBalance, _delegatedVotes[delegatee]);
+        // Add votes to new delegate (if not self and not zero)
+        if (delegatee != address(0) && delegatee != delegator) {
+            uint256 currentDelegateVotes = _votingPowerOf(delegatee, epochId);
+            uint256 newDelegateVotes = currentDelegateVotes + delegatorBalance;
+
+            _writeVotingPowerCheckpoint(delegatee, epochId, newDelegateVotes);
+
+            emit DelegateVotesChanged(delegatee, currentDelegateVotes, newDelegateVotes);
         }
     }
 
@@ -464,6 +574,7 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
         uint256 newVlTokenAmount = amount * numEpochs;
 
         // Update the lock with new end time and token amount
+        lock.start = _alignToEpoch(block.timestamp);
         lock.end = alignedUnlockTime;
         lock.vlTokenAmount = newVlTokenAmount;
 
@@ -471,7 +582,6 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
         userVlTokenBalance[msg.sender] = userVlTokenBalance[msg.sender] - oldVlTokenAmount + newVlTokenAmount;
 
         // ---- Epoch supply tracking ----
-        // Note: lock.end is updated later, so store old end epoch prior
         uint256 newEndEpochId = (alignedUnlockTime - genesisTime) / EPOCH_DURATION;
 
         // Only add the new voting power because the old one has already expired and
@@ -502,6 +612,21 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
         if (lock.amount == 0) revert NoExistingLock();
         if (block.timestamp < lock.end) revert LockNotExpired();
 
+        // Calculate voting power being removed
+        uint256 vlTokenAmount = lock.vlTokenAmount;
+
+        // Check delegation status and update voting power checkpoints
+        address delegatee = _delegateOf(msg.sender, currentEpoch);
+        if (delegatee != address(0) && delegatee != msg.sender) {
+            // This user has delegated their voting power, must update delegatee's power
+            uint256 currentDelegateVotes = _votingPowerOf(delegatee, currentEpoch);
+            uint256 newDelegateVotes = currentDelegateVotes > vlTokenAmount ? currentDelegateVotes - vlTokenAmount : 0;
+
+            _writeVotingPowerCheckpoint(delegatee, currentEpoch, newDelegateVotes);
+
+            emit DelegateVotesChanged(delegatee, currentDelegateVotes, newDelegateVotes);
+        }
+
         // Execute the common withdrawal logic and get the withdrawn amount
         uint256 value = _executeWithdrawal(lockId, lock);
 
@@ -513,9 +638,27 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
      * @param lockId The ID of the lock to withdraw from
      */
     function emergencyWithdraw(uint256 lockId) external whenPaused validLockId(msg.sender, lockId) {
+        // Ensure we're at the current epoch
+        _checkpointEpoch();
+
         Lock storage lock = userLocks[msg.sender][lockId];
 
         if (lock.amount == 0) revert NoExistingLock();
+
+        // Calculate voting power being removed
+        uint256 vlTokenAmount = lock.vlTokenAmount;
+
+        // Check delegation status and update voting power checkpoints
+        address delegatee = _delegateOf(msg.sender, currentEpoch);
+        if (delegatee != address(0) && delegatee != msg.sender) {
+            // This user has delegated their voting power, must update delegatee's power
+            uint256 currentDelegateVotes = _votingPowerOf(delegatee, currentEpoch);
+            uint256 newDelegateVotes = currentDelegateVotes > vlTokenAmount ? currentDelegateVotes - vlTokenAmount : 0;
+
+            _writeVotingPowerCheckpoint(delegatee, currentEpoch, newDelegateVotes);
+
+            emit DelegateVotesChanged(delegatee, currentDelegateVotes, newDelegateVotes);
+        }
 
         // Execute the common withdrawal logic and get the withdrawn amount
         uint256 value = _executeWithdrawal(lockId, lock);
@@ -550,7 +693,7 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
     function getAllLocks(address user) external view returns (Lock[] memory) {
         return userLocks[user];
     }
-    
+
     /**
      * @notice Get current total locked supply (collateral tokens)
      * @return Total amount of PUFFER tokens locked in the contract
@@ -637,7 +780,10 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
      * @return Active voting power of the account at the specified epoch
      */
     function balanceOfAtEpoch(address account, uint256 epoch) public view validEpoch(epoch) returns (uint256) {
-        return _calculateActiveBalanceOfAt(account, getEpochTimestamp(epoch));
+        // Get the timestamp of the requested epoch
+        uint256 epochTimestamp = getEpochTimestamp(epoch);
+
+        return _calculateActiveBalanceOfAt(account, epochTimestamp);
     }
 
     /**
@@ -658,15 +804,25 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
         return super.balanceOf(account);
     }
 
-    // ------------------------ DELEGATION METHODS FOR ERC20VOTES COMPATIBILITY ------------------------
+    // ------------------------ ERC20VOTES COMPATIBILITY METHODS ------------------------
 
     /**
-     * @notice Get the address that `account` has delegated to
+     * @notice Get the address that `account` had delegated to at a specific epoch
      * @param account The address to get the delegatee for
-     * @return The address the votes are delegated to
+     * @param epoch The epoch to check delegation status
+     * @return The address the votes were delegated to at that epoch
+     */
+    function getDelegatePast(address account, uint256 epoch) public view validEpoch(epoch) returns (address) {
+        return _delegateOf(account, epoch);
+    }
+
+    /**
+     * @notice Get the current delegatee of an account
+     * @param account The address to get the delegatee for
+     * @return The address the votes are currently delegated to
      */
     function delegates(address account) public view returns (address) {
-        return _delegates[account];
+        return _delegateOf(account, currentEpoch);
     }
 
     /**
@@ -674,6 +830,7 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
      * @param delegatee The address to delegate votes to
      */
     function delegate(address delegatee) public {
+        _checkpointEpoch(); // Ensure we're at the current epoch
         _delegate(msg.sender, delegatee);
     }
 
@@ -688,14 +845,15 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
      */
     function delegateBySig(address delegatee, uint256 nonce, uint256 expiry, uint8 v, bytes32 r, bytes32 s) public {
         if (block.timestamp > expiry) revert InvalidSignature();
-        
+
         bytes32 structHash = keccak256(abi.encode(_DELEGATION_TYPEHASH, delegatee, nonce, expiry));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparatorV4(), structHash));
         address signer = ECDSA.recover(digest, v, r, s);
-        
+
         if (nonce != nonces(signer)) revert InvalidSignature();
-        
+
         _useNonce(signer);
+        _checkpointEpoch(); // Ensure we're at the current epoch
         _delegate(signer, delegatee);
     }
 
@@ -705,7 +863,27 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
      * @return The number of current votes for `account`
      */
     function getVotes(address account) public view returns (uint256) {
-        return balanceOf(account);
+        // Get the account's delegation status
+        address delegatee = delegates(account);
+
+        // If delegated to someone else, this account has no direct voting power
+        if (delegatee != address(0) && delegatee != account) {
+            return 0;
+        }
+
+        // Get own balance
+        uint256 ownBalance = balanceOf(account);
+
+        // Add delegated votes from others
+        uint256 delegatedVotes = _votingPowerOf(account, currentEpoch);
+
+        // If account is self-delegated or has no explicit delegation,
+        // its voting power is its own balance
+        if (delegatee == account || delegatee == address(0)) {
+            return ownBalance + delegatedVotes;
+        }
+
+        return 0; // Should not reach here after the if-check above
     }
 
     /**
@@ -715,7 +893,26 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
      * @return The number of votes the account had at the specified epoch
      */
     function getPastVotes(address account, uint256 epoch) public view validEpoch(epoch) returns (uint256) {
-        return balanceOfAtEpoch(account, epoch);
+        // Check delegation status at the given epoch
+        address delegatee = _delegateOf(account, epoch);
+
+        // If account was delegating to someone else at this epoch, it had 0 direct voting power
+        if (delegatee != address(0) && delegatee != account) {
+            return 0;
+        }
+
+        // Get direct voting power at the given epoch
+        uint256 directVotingPower = balanceOfAtEpoch(account, epoch);
+
+        // Get votes delegated to this account at the given epoch
+        uint256 delegatedVotes = _votingPowerOf(account, epoch);
+
+        // If self-delegated or no explicit delegation, voting power includes direct balance
+        if (delegatee == account || delegatee == address(0)) {
+            return directVotingPower + delegatedVotes;
+        }
+
+        return 0; // Should not reach here after the if-check above
     }
 
     /**
@@ -729,9 +926,49 @@ contract PufferLocker is ERC20, ERC20Permit, Ownable2Step, Pausable {
 
     /**
      * @notice Returns the current voting power of all accounts
-     * @return The total voting power 
+     * @return The total voting power
      */
     function getTotalVotes() public view returns (uint256) {
         return totalSupply();
+    }
+
+    /**
+     * @notice Get the number of checkpoints for a delegator
+     * @param delegator The delegator address
+     * @return The number of checkpoints
+     */
+    function numCheckpoints(address delegator) external view returns (uint256) {
+        return _delegateCheckpoints[delegator].length;
+    }
+
+    /**
+     * @notice Get a specific checkpoint for a delegator
+     * @param delegator The delegator address
+     * @param index The checkpoint index
+     * @return The checkpoint data (epochId and delegate)
+     */
+    function getCheckpoint(address delegator, uint256 index) external view returns (uint256, address) {
+        Checkpoint storage checkpoint = _delegateCheckpoints[delegator][index];
+        return (checkpoint.epochId, checkpoint.delegate);
+    }
+
+    /**
+     * @notice Get the number of voting power checkpoints for a delegatee
+     * @param delegatee The delegatee address
+     * @return The number of checkpoints
+     */
+    function numVotingPowerCheckpoints(address delegatee) external view returns (uint256) {
+        return _votingPowerCheckpoints[delegatee].length;
+    }
+
+    /**
+     * @notice Get a specific voting power checkpoint for a delegatee
+     * @param delegatee The delegatee address
+     * @param index The checkpoint index
+     * @return The checkpoint data (epochId and votingPower)
+     */
+    function getVotingPowerCheckpoint(address delegatee, uint256 index) external view returns (uint256, uint256) {
+        VotingPowerCheckpoint storage checkpoint = _votingPowerCheckpoints[delegatee][index];
+        return (checkpoint.epochId, checkpoint.votingPower);
     }
 }
