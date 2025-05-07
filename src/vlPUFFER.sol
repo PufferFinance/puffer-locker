@@ -265,35 +265,43 @@ contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
     }
 
     /**
-     * @notice Kick a user and receive 1% of the PUFFER tokens as a reward
-     * @param user The address of the user to kick
+     * @notice Kick multiple users and receive 1% of their PUFFER tokens as a reward
+     * @param users Array of user addresses to kick
      */
-    function kickUser(address user) external {
-        LockInfo memory lockInfo = lockInfos[user];
+    function kickUsers(address[] calldata users) external {
+        uint256 totalKickerFee;
 
-        // The user has a grace period to withdraw their tokens
-        require(lockInfo.unlockTime + _GRACE_PERIOD < block.timestamp, TokensMustBeUnlocked());
+        for (uint256 i = 0; i < users.length; i++) {
+            address user = users[i];
+            LockInfo memory lockInfo = lockInfos[user];
 
-        uint256 vlPUFFERAmount = balanceOf(user);
+            // The user has a grace period to withdraw their tokens
+            require(lockInfo.unlockTime + _GRACE_PERIOD < block.timestamp, TokensMustBeUnlocked());
 
-        // 1% of the PUFFER tokens are sent to the kicker
-        uint256 kickerFee = lockInfo.pufferAmount * _KICKER_FEE_BPS / _KICKER_FEE_DENOMINATOR;
+            uint256 vlPUFFERAmount = balanceOf(user);
 
-        // The rest of the PUFFER tokens are sent to the user
-        uint256 pufferAmount = lockInfo.pufferAmount;
+            // 1% of the PUFFER tokens are sent to the kicker
+            uint256 kickerFee = lockInfo.pufferAmount * _KICKER_FEE_BPS / _KICKER_FEE_DENOMINATOR;
+            totalKickerFee += kickerFee;
 
-        delete lockInfos[user];
+            // The rest of the PUFFER tokens are sent to the user
+            uint256 pufferAmount = lockInfo.pufferAmount;
 
-        // Burn the vlPUFFER tokens
-        _burn(user, vlPUFFERAmount);
+            delete lockInfos[user];
 
-        // Send the kicker fee to the kicker
-        PUFFER.safeTransfer(msg.sender, kickerFee);
+            // Burn the vlPUFFER tokens
+            _burn(user, vlPUFFERAmount);
 
-        // Send the rest of the PUFFER tokens to the user
-        PUFFER.safeTransfer(user, pufferAmount - kickerFee);
+            // Send the rest of the PUFFER tokens to the user
+            PUFFER.safeTransfer(user, pufferAmount - kickerFee);
 
-        emit UserKicked({ kicker: msg.sender, user: user, vlPUFFERAmount: vlPUFFERAmount, kickerFee: kickerFee });
+            emit UserKicked({ kicker: msg.sender, user: user, vlPUFFERAmount: vlPUFFERAmount, kickerFee: kickerFee });
+        }
+
+        // Send all kicker fees in a single transfer
+        if (totalKickerFee > 0) {
+            PUFFER.safeTransfer(msg.sender, totalKickerFee);
+        }
     }
 
     /**

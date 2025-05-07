@@ -141,13 +141,81 @@ contract vlPUFFERTest is Test {
         uint256 kickerBalanceBefore = puffer.balanceOf(kicker);
         assertEq(kickerBalanceBefore, 0, "Bad kicker balance before kick");
 
+        address[] memory users = new address[](1);
+        users[0] = alice;
+
         vm.prank(kicker);
-        vlPuffer.kickUser(alice);
+        vlPuffer.kickUsers(users);
         uint256 kickerBalanceAfter = puffer.balanceOf(kicker);
 
         uint256 expectedKickerFee = amount * 100 / 10000; // 1% fee
         assertEq(kickerBalanceAfter, expectedKickerFee, "Bad kicker fee");
         assertEq(vlPuffer.balanceOf(alice), 0, "vlPUFFER balance should be 0 after kick");
+    }
+
+    function test_kickUsers() public {
+        uint256 amount = 100 ether;
+        uint256 lockDuration = 365 days;
+        uint256 unlockTime = block.timestamp + lockDuration;
+
+        // Create locks for multiple users
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), amount);
+        vlPuffer.createLock(amount, unlockTime);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        puffer.approve(address(vlPuffer), amount);
+        vlPuffer.createLock(amount, unlockTime);
+        vm.stopPrank();
+
+        // Fast forward past lock time and grace period
+        vm.warp(unlockTime + 1 weeks + 1);
+
+        address kicker = makeAddr("Kicker");
+        uint256 kickerBalanceBefore = puffer.balanceOf(kicker);
+        assertEq(kickerBalanceBefore, 0, "Bad kicker balance before kick");
+
+        address[] memory users = new address[](2);
+        users[0] = alice;
+        users[1] = bob;
+
+        vm.prank(kicker);
+        vlPuffer.kickUsers(users);
+        uint256 kickerBalanceAfter = puffer.balanceOf(kicker);
+
+        uint256 expectedKickerFee = (amount * 2) * 100 / 10000; // 1% fee for both users
+        assertEq(kickerBalanceAfter, expectedKickerFee, "Bad kicker fee");
+        assertEq(vlPuffer.balanceOf(alice), 0, "vlPUFFER balance should be 0 after kick for alice");
+        assertEq(vlPuffer.balanceOf(bob), 0, "vlPUFFER balance should be 0 after kick for bob");
+    }
+
+    function test_RevertWhen_kickUser_twice() public {
+        uint256 amount = 100 ether;
+        uint256 lockDuration = 365 days;
+        uint256 unlockTime = block.timestamp + lockDuration;
+
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), amount);
+        vlPuffer.createLock(amount, unlockTime);
+        vm.stopPrank();
+
+        // Fast forward past lock time and grace period
+        vm.warp(unlockTime + 1 weeks + 1);
+
+        address kicker = makeAddr("Kicker");
+        address[] memory users = new address[](1);
+        users[0] = alice;
+
+        // First kick should succeed
+        vm.prank(kicker);
+        vlPuffer.kickUsers(users);
+
+        // The same user can be kicked again but this time there are no token transfers
+        vm.prank(kicker);
+        vm.expectEmit(true, true, true, true);
+        emit vlPUFFER.UserKicked(kicker, alice, 0, 0);
+        vlPuffer.kickUsers(users);
     }
 
     function test_RevertWhen_createLock_insufficientAmount(uint256 amount) public {
@@ -197,8 +265,12 @@ contract vlPUFFERTest is Test {
 
         vm.warp(unlockTime + 1); // Just after unlock, before grace period
         vm.prank(bob);
+
+        address[] memory users = new address[](1);
+        users[0] = alice;
+
         vm.expectRevert(vlPUFFER.TokensMustBeUnlocked.selector);
-        vlPuffer.kickUser(alice);
+        vlPuffer.kickUsers(users);
     }
 
     function test_pauseAndUnpause() public {
@@ -390,9 +462,12 @@ contract vlPUFFERTest is Test {
     }
 
     function test_RevertWhen_kickUser_noLock() public {
+        address[] memory users = new address[](1);
+        users[0] = alice;
+
         vm.prank(bob);
         vm.expectRevert(vlPUFFER.TokensMustBeUnlocked.selector);
-        vlPuffer.kickUser(alice);
+        vlPuffer.kickUsers(users);
     }
 
     function test_RevertWhen_pause_notOwner() public {
