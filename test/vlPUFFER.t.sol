@@ -75,7 +75,39 @@ contract vlPUFFERTest is Test {
         vm.stopPrank();
 
         // 100 * 365 / 30 = 1216.666666666666666666
-        assertEq(vlPuffer.balanceOf(owner), 1216666666666666666666, "Bad vlPUFFER balance it should be ~ x12");
+        assertEq(vlPuffer.balanceOf(owner), 1216666666666666666666, "Bad vlPUFFER balance");
+    }
+
+    function test_createLockWithPermit_expired() public {
+        uint256 amount = 100 ether;
+        uint256 lockDuration = 365 days;
+        uint256 unlockTime = block.timestamp + lockDuration;
+        uint256 deadline = block.timestamp - 1; // Past deadline
+        uint256 privateKey = 0xA11CE;
+        address owner = vm.addr(privateKey);
+
+        puffer.mint(owner, amount);
+
+        vm.startPrank(owner);
+        bytes32 digest = puffer.getPermitDigest(owner, address(vlPuffer), amount, 0, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+        vm.expectRevert(abi.encodeWithSignature("ERC2612ExpiredSignature(uint256)", 0));
+        vlPuffer.createLockWithPermit(amount, unlockTime, deadline, v, r, s);
+        vm.stopPrank();
+    }
+
+    function test_createLock_withDelegation() public {
+        uint256 amount = 100 ether;
+        uint256 lockDuration = 365 days;
+        uint256 unlockTime = block.timestamp + lockDuration;
+
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), amount);
+        vlPuffer.createLock(amount, unlockTime);
+        vm.stopPrank();
+
+        // Check that alice is delegated to herself by default
+        assertEq(vlPuffer.delegates(alice), alice, "Default delegation should be to self");
     }
 
     function test_reLock() public {
@@ -98,6 +130,23 @@ contract vlPUFFERTest is Test {
         // (100 + 50) * 730 / 30 = 3650 vlPUFFER
         // that is x24 multiplier
         assertEq(vlPuffer.balanceOf(alice), 3650 ether, "Bad vlPUFFER balance after reLock");
+    }
+
+    function test_reLock_withZeroAmountAndSameUnlockTime() public {
+        uint256 initialAmount = 100 ether;
+        uint256 initialLockDuration = 365 days;
+        uint256 initialUnlockTime = block.timestamp + initialLockDuration;
+
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), type(uint256).max);
+        vlPuffer.createLock(initialAmount, initialUnlockTime);
+
+        // Relock with same unlock time and zero amount should succeed
+        vlPuffer.reLock(0, initialUnlockTime);
+        vm.stopPrank();
+
+        // Balance should remain the same
+        assertEq(vlPuffer.balanceOf(alice), 1216666666666666666666, "Bad vlPUFFER balance after reLock");
     }
 
     function test_withdraw(uint256 amount) public {
@@ -386,24 +435,6 @@ contract vlPUFFERTest is Test {
         vm.stopPrank();
     }
 
-    function test_RevertWhen_createLockWithPermit_invalidDeadline() public {
-        uint256 amount = 100 ether;
-        uint256 lockDuration = 365 days;
-        uint256 unlockTime = block.timestamp + lockDuration;
-        uint256 deadline = block.timestamp - 1; // Past deadline
-        uint256 privateKey = 0xA11CE;
-        address owner = vm.addr(privateKey);
-
-        puffer.mint(owner, amount);
-
-        vm.startPrank(owner);
-        bytes32 digest = puffer.getPermitDigest(owner, address(vlPuffer), amount, 0, deadline);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
-        vm.expectRevert(abi.encodeWithSignature("ERC2612ExpiredSignature(uint256)", 0));
-        vlPuffer.createLockWithPermit(amount, unlockTime, deadline, v, r, s);
-        vm.stopPrank();
-    }
-
     function test_reLock_decreaseVlPuffer() public {
         uint256 initialAmount = 100 ether;
         uint256 initialLockDuration = 365 days;
@@ -566,5 +597,109 @@ contract vlPUFFERTest is Test {
         assertEq(vlPuffer.getPastTotalSupply(snapshotTime), 4866666666666666666666, "Bad past total supply");
     }
 
-    //@todo test delegation and how it works
+    function test_reLock_withAdditionalTokens() public {
+        uint256 initialAmount = 100 ether;
+        uint256 initialLockDuration = 365 days;
+        uint256 initialUnlockTime = block.timestamp + initialLockDuration;
+
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), type(uint256).max);
+        vlPuffer.createLock(initialAmount, initialUnlockTime);
+
+        // Add more tokens and extend lock
+        uint256 additionalAmount = 50 ether;
+        uint256 newLockDuration = 2 * 365 days;
+        uint256 newUnlockTime = block.timestamp + newLockDuration;
+
+        vlPuffer.reLock(additionalAmount, newUnlockTime);
+        vm.stopPrank();
+
+        // (100 + 50) * 730 / 30 = 3650 vlPUFFER
+        assertEq(vlPuffer.balanceOf(alice), 3650 ether, "Bad vlPUFFER balance after reLock");
+    }
+
+    function test_reLock_withZeroAmount() public {
+        uint256 initialAmount = 100 ether;
+        uint256 initialLockDuration = 365 days;
+        uint256 initialUnlockTime = block.timestamp + initialLockDuration;
+
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), type(uint256).max);
+        vlPuffer.createLock(initialAmount, initialUnlockTime);
+
+        // Extend lock without adding more tokens
+        uint256 newLockDuration = 2 * 365 days;
+        uint256 newUnlockTime = block.timestamp + newLockDuration;
+
+        vlPuffer.reLock(0, newUnlockTime);
+        vm.stopPrank();
+
+        // 100 * 730 / 30 = 2433.333333333333333333 vlPUFFER
+        assertEq(vlPuffer.balanceOf(alice), 2433333333333333333333, "Bad vlPUFFER balance after reLock");
+    }
+
+    function test_kickUsers_withMultipleUsers() public {
+        uint256 amount = 100 ether;
+        uint256 lockDuration = 365 days;
+        uint256 unlockTime = block.timestamp + lockDuration;
+
+        // Create locks for multiple users
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), amount);
+        vlPuffer.createLock(amount, unlockTime);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        puffer.approve(address(vlPuffer), amount);
+        vlPuffer.createLock(amount, unlockTime);
+        vm.stopPrank();
+
+        // Fast forward past lock time and grace period
+        vm.warp(unlockTime + 1 weeks + 1);
+
+        address kicker = makeAddr("Kicker");
+        uint256 kickerBalanceBefore = puffer.balanceOf(kicker);
+        assertEq(kickerBalanceBefore, 0, "Bad kicker balance before kick");
+
+        address[] memory users = new address[](2);
+        users[0] = alice;
+        users[1] = bob;
+
+        vm.prank(kicker);
+        vlPuffer.kickUsers(users);
+        uint256 kickerBalanceAfter = puffer.balanceOf(kicker);
+
+        uint256 expectedKickerFee = (amount * 2) * 100 / 10000; // 1% fee for both users
+        assertEq(kickerBalanceAfter, expectedKickerFee, "Bad kicker fee");
+        assertEq(vlPuffer.balanceOf(alice), 0, "vlPUFFER balance should be 0 after kick for alice");
+        assertEq(vlPuffer.balanceOf(bob), 0, "vlPUFFER balance should be 0 after kick for bob");
+    }
+
+    function test_kickUsers_withNoFee() public {
+        uint256 amount = 100 ether;
+        uint256 lockDuration = 365 days;
+        uint256 unlockTime = block.timestamp + lockDuration;
+
+        vm.startPrank(alice);
+        puffer.approve(address(vlPuffer), amount);
+        vlPuffer.createLock(amount, unlockTime);
+        vm.stopPrank();
+
+        // Fast forward past lock time and grace period
+        vm.warp(unlockTime + 1 weeks + 1);
+
+        address kicker = makeAddr("Kicker");
+        address[] memory users = new address[](1);
+        users[0] = alice;
+
+        // First kick should succeed
+        vm.prank(kicker);
+        vlPuffer.kickUsers(users);
+
+        // The same user can be kicked again but this time there are no token transfers
+        vm.prank(kicker);
+        vm.expectEmit(true, true, true, true);
+        emit vlPUFFER.UserKicked(kicker, alice, 0, 0);
+        vlPuffer.kickUsers(users);
+    }
 }

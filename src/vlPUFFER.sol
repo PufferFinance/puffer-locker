@@ -154,7 +154,7 @@ contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
 
         // Calculate vlPUFFER amount based on the lock duration
         // Multiplier is 30 days, if the user locks for 2 years, they should get PUFFER x 24 vlPUFFER
-        uint256 vlPUFFERAmount = amount * (unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER;
+        uint256 vlPUFFERAmount = (amount * (unlockTime - block.timestamp)) / _LOCK_TIME_MULTIPLIER;
 
         uint256 supplyBefore = totalSupply();
 
@@ -201,7 +201,7 @@ contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
         uint256 pufferAmount = lockInfo.pufferAmount + amount;
 
         // Calculate the new vlPUFFER amount for the re-locked tokens
-        uint256 newVlPUFFERAmount = pufferAmount * (unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER;
+        uint256 newVlPUFFERAmount = (pufferAmount * (unlockTime - block.timestamp)) / _LOCK_TIME_MULTIPLIER;
 
         uint256 currentBalance = balanceOf(msg.sender);
         uint256 supplyBefore = totalSupply();
@@ -281,7 +281,7 @@ contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
             uint256 vlPUFFERAmount = balanceOf(user);
 
             // 1% of the PUFFER tokens are sent to the kicker
-            uint256 kickerFee = lockInfo.pufferAmount * _KICKER_FEE_BPS / _KICKER_FEE_DENOMINATOR;
+            uint256 kickerFee = (lockInfo.pufferAmount * _KICKER_FEE_BPS) / _KICKER_FEE_DENOMINATOR;
             totalKickerFee += kickerFee;
 
             // The rest of the PUFFER tokens are sent to the user
