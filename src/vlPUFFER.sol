@@ -21,19 +21,23 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
  * In return, they receive vlPUFFER tokens that represent their voting power.
  * The amount of vlPUFFER tokens received is calculated as follows:
  *
- * vlPUFFER = amount * (unlockTime - block.timestamp) / (30 days)
+ * The multiplier is 30 days. This means if a user locks for 1 year (365 days) they will get x12 multiplier on their PUFFER tokens
+ * but the actual unlock time will be slightly lower than 1 year (~360 days).
+ *
+ * vlPUFFERAmount = (pufferAmount * (unlockTime - block.timestamp)) / _LOCK_TIME_MULTIPLIER;
  *
  * vlPUFFER Multiplier examples:
- * 3 months: ~x3
- * 6 months: ~x6
- * 9 months: ~x9
- * 12 months: ~x12
- * 15 months: ~x15
- * 18 months: ~x18
- * 21 months: ~x21
- * 24 months: ~x24
+ * 3 months: x3
+ * 6 months: x6
+ * 9 months: x9
+ * 12 months: x12
+ * 15 months: x15
+ * 18 months: x18
+ * 21 months: x21
+ * 24 months: x24
  *
- * The numbers will not be exactly because we are using 30 days as a multiplier, but it will be close.
+ * Because of the rounding, if a user wants to achieve x3 multiplier, they should do a transaction where unlockTime is 3 months + 1 day.
+ * In the smart contract, we will round down the unlockTime to the nearest 30 day multiplier, so the user will get x3 multiplier.
  *
  * The user has a grace period to withdraw their tokens after the lock expires, if they don't, they are kicked, and 1% of the PUFFER tokens are sent as a reward to the kicker
  *
@@ -149,9 +153,13 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         require(amount >= _MIN_LOCK_AMOUNT, InvalidAmount());
         require(lockInfos[msg.sender].pufferAmount == 0, LockAlreadyExists());
 
+        // Round down unlockTime to the nearest 30-day multiplier
+        unlockTime =
+            block.timestamp + (((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER) * _LOCK_TIME_MULTIPLIER);
+
         // Calculate vlPUFFER amount based on the lock duration
         // Multiplier is 30 days, if the user locks for 2 years, they should get PUFFER x 24 vlPUFFER
-        uint256 vlPUFFERAmount = (amount * (unlockTime - block.timestamp)) / _LOCK_TIME_MULTIPLIER;
+        uint256 vlPUFFERAmount = amount * ((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER);
 
         uint256 supplyBefore = totalSupply();
 
@@ -193,6 +201,10 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         // User may deposit more tokens to old lock, or extend the lock
         require(unlockTime >= lockInfo.unlockTime, UnlockTimeMustBeGreaterOrEqualThanLock());
         require(lockInfo.pufferAmount > 0, LockDoesNotExist());
+
+        // Round down unlockTime to the nearest 30-day multiplier
+        unlockTime =
+            block.timestamp + (((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER) * _LOCK_TIME_MULTIPLIER);
 
         // the new puffer amount is the sum of the old puffer amount and the new deposit (if any)
         uint256 pufferAmount = lockInfo.pufferAmount + amount;

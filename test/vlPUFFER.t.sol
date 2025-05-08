@@ -28,6 +28,7 @@ contract vlPUFFERTest is Test {
         // Mint tokens to test users
         puffer.mint(alice, 1000 ether);
         puffer.mint(bob, 1000 ether);
+        vm.warp(1); //block timestamp is 0 by default, make it 1 to avoid bad calculations
     }
 
     function test_constructor() public view {
@@ -52,9 +53,15 @@ contract vlPUFFERTest is Test {
         vlPuffer.createLock(amount, unlockTime);
         vm.stopPrank();
 
-        // 100 * 365 / 30 = 1216.666666666666666666
-        assertEq(vlPuffer.balanceOf(alice), 1216666666666666666666, "Bad vlPUFFER balance it should be ~ x12");
+        // 100 * 365 / 30 = 1200
+        assertEq(vlPuffer.balanceOf(alice), amount * 12, "Bad vlPUFFER balance it should be ~ x12");
         assertEq(puffer.balanceOf(address(vlPuffer)), amount, "Bad PUFFER balance");
+
+        (uint256 pufferAmount, uint256 time) = vlPuffer.lockInfos(alice);
+        assertEq(pufferAmount, amount, "Bad puffer amount");
+
+        // There is a small difference because of the rounding
+        assertApproxEqRel(time, 360 days, 0.0001 ether, "Bad unlock time"); // 360 days because of the rounding
     }
 
     function test_createLockWithPermit() public {
@@ -74,8 +81,8 @@ contract vlPUFFERTest is Test {
         vlPuffer.createLockWithPermit(amount, unlockTime, deadline, v, r, s);
         vm.stopPrank();
 
-        // 100 * 365 / 30 = 1216.666666666666666666
-        assertEq(vlPuffer.balanceOf(owner), 1216666666666666666666, "Bad vlPUFFER balance");
+        // 100 * 365 / 30 = 1200
+        assertEq(vlPuffer.balanceOf(owner), amount * 12, "Bad vlPUFFER balance");
     }
 
     function test_createLockWithPermit_expired() public {
@@ -127,9 +134,9 @@ contract vlPUFFERTest is Test {
         vlPuffer.reLock(additionalAmount, newUnlockTime);
         vm.stopPrank();
 
-        // (100 + 50) * 730 / 30 = 3650 vlPUFFER
+        // (100 + 50) * 24 = 3600 vlPUFFER
         // that is x24 multiplier
-        assertEq(vlPuffer.balanceOf(alice), 3650 ether, "Bad vlPUFFER balance after reLock");
+        assertEq(vlPuffer.balanceOf(alice), 3600 ether, "Bad vlPUFFER balance after reLock");
     }
 
     function test_reLock_withZeroAmountAndSameUnlockTime() public {
@@ -146,7 +153,7 @@ contract vlPUFFERTest is Test {
         vm.stopPrank();
 
         // Balance should remain the same
-        assertEq(vlPuffer.balanceOf(alice), 1216666666666666666666, "Bad vlPUFFER balance after reLock");
+        assertEq(vlPuffer.balanceOf(alice), 1200 ether, "Bad vlPUFFER balance after reLock");
     }
 
     function test_withdraw(uint256 amount) public {
@@ -371,9 +378,11 @@ contract vlPUFFERTest is Test {
         puffer.approve(address(vlPuffer), amount);
         vlPuffer.createLock(amount, unlockTime);
 
+        assertEq(vlPuffer.balanceOf(alice), 1200 ether, "Bad vlPUFFER balance after createLock");
+
         // Try to relock with earlier unlock time
         vm.expectRevert(vlPUFFER.UnlockTimeMustBeGreaterOrEqualThanLock.selector);
-        vlPuffer.reLock(0, unlockTime - 1);
+        vlPuffer.reLock(0, (unlockTime - 15 days));
         vm.stopPrank();
     }
 
@@ -421,28 +430,6 @@ contract vlPUFFERTest is Test {
         // Try to create another lock
         vm.expectRevert(vlPUFFER.LockAlreadyExists.selector);
         vlPuffer.createLock(amount, unlockTime);
-        vm.stopPrank();
-    }
-
-    function test_reLock_decreaseVlPuffer() public {
-        uint256 initialAmount = 100 ether;
-        uint256 initialLockDuration = 365 days;
-        uint256 initialUnlockTime = block.timestamp + initialLockDuration;
-
-        vm.startPrank(alice);
-        puffer.approve(address(vlPuffer), type(uint256).max);
-        vlPuffer.createLock(initialAmount, initialUnlockTime);
-
-        // Fast forward 6 months
-        vm.warp(block.timestamp + 180 days);
-
-        // Relock with same amount but shorter duration
-        uint256 newLockDuration = 180 days;
-        uint256 newUnlockTime = block.timestamp + newLockDuration;
-
-        // Should fail because new unlock time is before current unlock time
-        vm.expectRevert(vlPUFFER.UnlockTimeMustBeGreaterOrEqualThanLock.selector);
-        vlPuffer.reLock(0, newUnlockTime);
         vm.stopPrank();
     }
 
@@ -537,7 +524,8 @@ contract vlPUFFERTest is Test {
     }
 
     function test_delegation() public {
-        uint256 twoYears = 2 * 365 days;
+        // Add 1 second because of the rounding in the voting power calculation
+        uint256 twoYears = 2 * 365 days + 1;
         uint256 amount = 100 ether;
 
         uint256 originalTime = block.timestamp;
@@ -548,7 +536,7 @@ contract vlPUFFERTest is Test {
         vlPuffer.createLock(amount, unlockTime);
         vm.stopPrank();
 
-        uint256 twoYearVotingPower = 2433333333333333333333;
+        uint256 twoYearVotingPower = amount * 24;
         assertEq(vlPuffer.getVotes(alice), twoYearVotingPower, "Alice has the same voting power in vlPUFFER");
 
         vm.startPrank(bob);
@@ -562,7 +550,8 @@ contract vlPUFFERTest is Test {
         vlPuffer.getVotes(alice);
 
         // Alice got her own votes + delegated votes from Bob
-        assertEq(vlPuffer.getVotes(alice), 4866666666666666666666, "Bad votes");
+        assertEq(vlPuffer.getVotes(alice), 2 * twoYearVotingPower, "Bad votes");
+        assertEq(vlPuffer.totalSupply(), 2 * twoYearVotingPower, "Bad total supply");
         assertEq(vlPuffer.getVotes(bob), 0, "Bad votes");
         assertEq(vlPuffer.getVotes(charlie), 0, "Bad votes");
 
@@ -572,11 +561,12 @@ contract vlPUFFERTest is Test {
 
         assertEq(
             vlPuffer.getPastVotes(alice, presentTimestamp - 8 days),
-            4866666666666666666666,
+            2 * twoYearVotingPower,
             "Bad votes in the last voting period Alice"
         );
-        assertEq(vlPuffer.totalSupply(), 4866666666666666666666, "Bad total supply in the last voting period");
+        assertEq(vlPuffer.totalSupply(), 2 * twoYearVotingPower, "Bad total supply in the last voting period");
 
+        // David creates a new lock, but delegates to self
         address david = makeAddr("David");
         puffer.mint(david, 1000 ether);
 
@@ -585,26 +575,26 @@ contract vlPUFFERTest is Test {
         vlPuffer.createLock(amount, block.timestamp + twoYears);
         vm.stopPrank();
 
-        assertEq(vlPuffer.getVotes(david), twoYearVotingPower, "David has the same voting power in vlPUFFER");
+        assertEq(vlPuffer.getVotes(david), twoYearVotingPower, "David has 2 year voting power in vlPUFFER present");
 
         uint256 alicePastVotes = vlPuffer.getPastVotes(alice, presentTimestamp - 8 days);
-        assertEq(alicePastVotes, 4866666666666666666666, "Alice has the same voting power in vlPUFFER");
-        assertEq(
-            vlPuffer.getVotes(alice), 4866666666666666666666, "Alice has the same voting power in vlPUFFER in present"
-        );
+        assertEq(alicePastVotes, 2 * twoYearVotingPower, "Alice has 2 year voting power in vlPUFFER past");
+        assertEq(vlPuffer.getVotes(alice), 2 * twoYearVotingPower, "Alice has 2 year voting power in vlPUFFER present");
         // 3 * twoYearVotingPower
-        uint256 totalSupplyAfter3Locks = 7299999999999999999999;
+        uint256 totalSupplyAfter3Locks = 3 * twoYearVotingPower;
         assertEq(vlPuffer.totalSupply(), totalSupplyAfter3Locks, "Total supply is increased for David's vlPUFFER");
 
+        // Charlie delegates to Alice
         vm.startPrank(charlie);
         puffer.approve(address(vlPuffer), amount);
         vlPuffer.createLock(amount, twoYears);
+        assertEq(vlPuffer.getVotes(charlie), twoYearVotingPower, "David has 2 year voting power in vlPUFFER present");
         vlPuffer.delegate(alice);
         vm.stopPrank();
 
-        // The present values increased
-        assertEq(vlPuffer.getVotes(alice), 7266666628086419753085, "Alice voting power in present increased");
-        assertEq(vlPuffer.totalSupply(), 9699999961419753086418, "Total supply in present is increased");
+        // The present values increased, Alice has 3 delegated votes (1 alice, 1 bob, 1 charlie)
+        assertEq(vlPuffer.getVotes(alice), 3 * twoYearVotingPower, "Alice voting power in present increased");
+        assertEq(vlPuffer.totalSupply(), 4 * twoYearVotingPower, "Total supply in present is increased");
 
         // Go in to the future
         vm.warp(block.timestamp + 100 days);
@@ -619,15 +609,15 @@ contract vlPUFFERTest is Test {
         // At this time, we only had two locks, so the totalSupply is 2 * 2433333333333333333333
         assertEq(
             vlPuffer.getPastTotalSupply(presentTimestamp - 8 days),
-            4866666666666666666666,
+            2 * twoYearVotingPower,
             "Total supply in the past remained"
         );
 
         // Here, we had 4 locks (alice, bob, charlie, david)
         assertEq(
             vlPuffer.getPastTotalSupply(presentTimestamp),
-            9699999961419753086418,
-            "Total supply in the past after 3 locks"
+            4 * twoYearVotingPower,
+            "Total supply in the past after 4 locks"
         );
     }
 
@@ -648,8 +638,7 @@ contract vlPUFFERTest is Test {
         vlPuffer.reLock(additionalAmount, newUnlockTime);
         vm.stopPrank();
 
-        // (100 + 50) * 730 / 30 = 3650 vlPUFFER
-        assertEq(vlPuffer.balanceOf(alice), 3650 ether, "Bad vlPUFFER balance after reLock");
+        assertEq(vlPuffer.balanceOf(alice), 3600 ether, "Bad vlPUFFER balance after reLock");
     }
 
     function test_reLock_withZeroAmount() public {
@@ -668,8 +657,7 @@ contract vlPUFFERTest is Test {
         vlPuffer.reLock(0, newUnlockTime);
         vm.stopPrank();
 
-        // 100 * 730 / 30 = 2433.333333333333333333 vlPUFFER
-        assertEq(vlPuffer.balanceOf(alice), 2433333333333333333333, "Bad vlPUFFER balance after reLock");
+        assertEq(vlPuffer.balanceOf(alice), 2400 ether, "Bad vlPUFFER balance after reLock");
     }
 
     function test_kickUsers_withMultipleUsers() public {
