@@ -28,7 +28,6 @@ contract vlPUFFERTest is Test {
         // Mint tokens to test users
         puffer.mint(alice, 1000 ether);
         puffer.mint(bob, 1000 ether);
-        vm.warp(1); //block timestamp is 0 by default, make it 1 to avoid bad calculations
     }
 
     function test_constructor() public view {
@@ -204,7 +203,7 @@ contract vlPUFFERTest is Test {
         vlPuffer.kickUsers(users);
         uint256 kickerBalanceAfter = puffer.balanceOf(kicker);
 
-        uint256 expectedKickerFee = amount * 100 / 10000; // 1% fee
+        uint256 expectedKickerFee = amount * 100 / 10_000; // 1% fee
         assertEq(kickerBalanceAfter, expectedKickerFee, "Bad kicker fee");
         assertEq(vlPuffer.balanceOf(alice), 0, "vlPUFFER balance should be 0 after kick");
     }
@@ -240,7 +239,7 @@ contract vlPUFFERTest is Test {
         vlPuffer.kickUsers(users);
         uint256 kickerBalanceAfter = puffer.balanceOf(kicker);
 
-        uint256 expectedKickerFee = (amount * 2) * 100 / 10000; // 1% fee for both users
+        uint256 expectedKickerFee = (amount * 2) * 100 / 10_000; // 1% fee for both users
         assertEq(kickerBalanceAfter, expectedKickerFee, "Bad kicker fee");
         assertEq(vlPuffer.balanceOf(alice), 0, "vlPUFFER balance should be 0 after kick for alice");
         assertEq(vlPuffer.balanceOf(bob), 0, "vlPUFFER balance should be 0 after kick for bob");
@@ -691,7 +690,7 @@ contract vlPUFFERTest is Test {
         vlPuffer.kickUsers(users);
         uint256 kickerBalanceAfter = puffer.balanceOf(kicker);
 
-        uint256 expectedKickerFee = (amount * 2) * 100 / 10000; // 1% fee for both users
+        uint256 expectedKickerFee = (amount * 2) * 100 / 10_000; // 1% fee for both users
         assertEq(kickerBalanceAfter, expectedKickerFee, "Bad kicker fee");
         assertEq(vlPuffer.balanceOf(alice), 0, "vlPUFFER balance should be 0 after kick for alice");
         assertEq(vlPuffer.balanceOf(bob), 0, "vlPUFFER balance should be 0 after kick for bob");
