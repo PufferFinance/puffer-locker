@@ -70,7 +70,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     );
     event UserKicked(address indexed kicker, address indexed user, uint256 vlPUFFERAmount, uint256 kickerFee);
 
-    // If a user locks 1 token for 2 years, they will get 24 vlPUFFER
+    // If a user locks 100 PUFFER tokens for 2 years, they will get 24000 vlPUFFER
     // 1 days is because of the time it takes for transaction to be confirmed on the chain, without it the user wouldn't be able to lock the tokens for 2 years
     uint256 internal constant _MAX_LOCK_TIME = 2 * 365 days + 1 days;
     // The user has 1 week to withdraw their tokens after the lock expires, if they don't, they are kicked, and 1% of the PUFFER tokens are sent as a reward to the kicker
@@ -78,7 +78,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     // 1% in basis points
     uint256 internal constant _KICKER_FEE_BPS = 100;
     // 10000 in basis points
-    uint256 internal constant _KICKER_FEE_DENOMINATOR = 10000;
+    uint256 internal constant _KICKER_FEE_DENOMINATOR = 10_000;
     // Multiplier for vlPUFFER amount calculation
     uint256 internal constant _LOCK_TIME_MULTIPLIER = 30 days;
     // The minimum amount of PUFFER (PUFFER has 18 decimals, so this is 10 PUFFER) tokens that can be locked to receive vlPUFFER
@@ -149,17 +149,25 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         _createLock(value, unlockTime);
     }
 
+    function _calculateUnlockTimeAndMultiplier(uint256 unlockTime)
+        internal
+        view
+        returns (uint256 roundedUnlockTime, uint256 multiplier)
+    {
+        multiplier = ((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER);
+        // Round down the unlockTime to the nearest 30-day multiplier
+        roundedUnlockTime = block.timestamp + (multiplier * _LOCK_TIME_MULTIPLIER);
+    }
+
     function _createLock(uint256 amount, uint256 unlockTime) internal onlyValidLockDuration(unlockTime) whenNotPaused {
         require(amount >= _MIN_LOCK_AMOUNT, InvalidAmount());
         require(lockInfos[msg.sender].pufferAmount == 0, LockAlreadyExists());
 
-        // Round down unlockTime to the nearest 30-day multiplier
-        unlockTime =
-            block.timestamp + (((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER) * _LOCK_TIME_MULTIPLIER);
+        (uint256 roundedUnlockTime, uint256 multiplier) = _calculateUnlockTimeAndMultiplier(unlockTime);
 
         // Calculate vlPUFFER amount based on the lock duration
         // Multiplier is 30 days, if the user locks for 2 years, they should get PUFFER x 24 vlPUFFER
-        uint256 vlPUFFERAmount = amount * ((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER);
+        uint256 vlPUFFERAmount = amount * multiplier;
 
         uint256 supplyBefore = totalSupply();
 
@@ -167,7 +175,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         _mint(msg.sender, vlPUFFERAmount);
 
         // Update the lock information
-        lockInfos[msg.sender] = LockInfo({ pufferAmount: amount, unlockTime: unlockTime });
+        lockInfos[msg.sender] = LockInfo({ pufferAmount: amount, unlockTime: roundedUnlockTime });
 
         // If this is the first mint and the user hasn't delegated yet,
         // delegate to themselves by default
@@ -202,15 +210,13 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         require(unlockTime >= lockInfo.unlockTime, UnlockTimeMustBeGreaterOrEqualThanLock());
         require(lockInfo.pufferAmount > 0, LockDoesNotExist());
 
-        // Round down unlockTime to the nearest 30-day multiplier
-        unlockTime =
-            block.timestamp + (((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER) * _LOCK_TIME_MULTIPLIER);
+        (uint256 roundedUnlockTime, uint256 multiplier) = _calculateUnlockTimeAndMultiplier(unlockTime);
 
         // the new puffer amount is the sum of the old puffer amount and the new deposit (if any)
         uint256 pufferAmount = lockInfo.pufferAmount + amount;
 
         // Calculate the new vlPUFFER amount for the re-locked tokens
-        uint256 newVlPUFFERAmount = (pufferAmount * (unlockTime - block.timestamp)) / _LOCK_TIME_MULTIPLIER;
+        uint256 newVlPUFFERAmount = pufferAmount * multiplier;
 
         uint256 currentBalance = balanceOf(msg.sender);
         uint256 supplyBefore = totalSupply();
@@ -235,7 +241,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         // If newVlPUFFERAmount == currentBalance, no change to balance is needed.
 
         // Update the lock information
-        lockInfos[msg.sender] = LockInfo({ pufferAmount: pufferAmount, unlockTime: unlockTime });
+        lockInfos[msg.sender] = LockInfo({ pufferAmount: pufferAmount, unlockTime: roundedUnlockTime });
 
         emit ReLockedTokens({
             user: msg.sender,
@@ -280,7 +286,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     function kickUsers(address[] calldata users) external {
         uint256 totalKickerFee;
 
-        for (uint256 i = 0; i < users.length; i++) {
+        for (uint256 i = 0; i < users.length; ++i) {
             address user = users[i];
             LockInfo memory lockInfo = lockInfos[user];
 
@@ -314,6 +320,22 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     }
 
     /**
+     * @notice Get the current timestamp
+     * @return The current timestamp
+     */
+    function clock() public view override returns (uint48) {
+        return uint48(block.timestamp);
+    }
+
+    /**
+     * @notice Get the CLOCK_MODE
+     * @return The CLOCK_MODE
+     */
+    function CLOCK_MODE() public pure override returns (string memory) {
+        return "mode=timestamp";
+    }
+
+    /**
      * @notice Pause the contract
      * @dev Can only be called by the contract owner
      */
@@ -342,21 +364,5 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
             // Block transfers between users
             revert TransfersDisabled();
         }
-    }
-
-    /**
-     * @notice Get the current timestamp
-     * @return The current timestamp
-     */
-    function clock() public view override returns (uint48) {
-        return uint48(block.timestamp);
-    }
-
-    /**
-     * @notice Get the CLOCK_MODE
-     * @return The CLOCK_MODE
-     */
-    function CLOCK_MODE() public pure override returns (string memory) {
-        return "mode=timestamp";
     }
 }
