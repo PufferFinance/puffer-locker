@@ -24,7 +24,7 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
  * The multiplier is 30 days. This means if a user locks for 1 year (365 days) they will get x12 multiplier on their PUFFER tokens
  * but the actual unlock time will be slightly lower than 1 year (~360 days).
  *
- * vlPUFFERAmount = (pufferAmount * (unlockTime - block.timestamp)) / _LOCK_TIME_MULTIPLIER;
+ * vlPUFFERAmount = pufferAmount * ((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER);
  *
  * vlPUFFER Multiplier examples:
  * 3 months: x3
