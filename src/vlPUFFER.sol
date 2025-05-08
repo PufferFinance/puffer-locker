@@ -94,14 +94,6 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         uint256 unlockTime;
     }
 
-    modifier onlyValidLockDuration(uint256 unlockTime) {
-        // The lock duration must be at least 30 days to receive vlPUFFER, because of the rounding in the vlPUFFER calculation
-        // The user would receive 0 vlPUFFER if the lock duration is less than 30 days
-        require(unlockTime - block.timestamp >= _LOCK_TIME_MULTIPLIER, LockDurationMustBeAtLeast30Days());
-        require(unlockTime <= block.timestamp + _MAX_LOCK_TIME, ExceedsMaxLockTime());
-        _;
-    }
-
     /**
      * @notice Mapping of user addresses to their lock information
      * @dev The key is the user address, and the value is a LockInfo struct containing:
@@ -109,6 +101,14 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
      * - unlockTime: The timestamp when the lock will expire
      */
     mapping(address user => LockInfo lockInfo) public lockInfos;
+
+    modifier onlyValidLockDuration(uint256 unlockTime) {
+        // The lock duration must be at least 30 days to receive vlPUFFER, because of the rounding in the vlPUFFER calculation
+        // The user would receive 0 vlPUFFER if the lock duration is less than 30 days
+        require(unlockTime - block.timestamp >= _LOCK_TIME_MULTIPLIER, LockDurationMustBeAtLeast30Days());
+        require(unlockTime <= block.timestamp + _MAX_LOCK_TIME, ExceedsMaxLockTime());
+        _;
+    }
 
     constructor(address contractOwner, address pufferToken)
         ERC20("vlPUFFER", "vlPUFFER")
