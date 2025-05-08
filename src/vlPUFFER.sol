@@ -5,11 +5,10 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { ERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import { EIP712 } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import { ERC20Votes } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
 import { IERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { Nonces } from "@openzeppelin/contracts/utils/Nonces.sol";
 import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
@@ -40,12 +39,11 @@ import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
  *
  * @custom:security-contact security@puffer.fi
  */
-contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
+contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     using SafeERC20 for IERC20;
 
     error TransfersDisabled();
     error InvalidAmount();
-    error FutureLockTimeRequired();
     error ExceedsMaxLockTime();
     error UnlockTimeMustBeGreaterOrEqualThanLock();
     error TokensMustBeUnlocked();
@@ -95,7 +93,6 @@ contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
     modifier onlyValidLockDuration(uint256 unlockTime) {
         // The lock duration must be at least 30 days to receive vlPUFFER, because of the rounding in the vlPUFFER calculation
         // The user would receive 0 vlPUFFER if the lock duration is less than 30 days
-        require(unlockTime > block.timestamp, FutureLockTimeRequired());
         require(unlockTime - block.timestamp >= _LOCK_TIME_MULTIPLIER, LockDurationMustBeAtLeast30Days());
         require(unlockTime <= block.timestamp + _MAX_LOCK_TIME, ExceedsMaxLockTime());
         _;
@@ -111,7 +108,7 @@ contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
 
     constructor(address contractOwner, address pufferToken)
         ERC20("vlPUFFER", "vlPUFFER")
-        ERC20Permit("vlPUFFER")
+        EIP712("vlPUFFER", "1")
         Ownable(contractOwner)
     {
         require(pufferToken != address(0), InvalidPufferToken());
@@ -333,15 +330,6 @@ contract vlPUFFER is ERC20, ERC20Permit, ERC20Votes, Ownable2Step, Pausable {
             // Block transfers between users
             revert TransfersDisabled();
         }
-    }
-
-    /**
-     * @notice Get the nonce for a user
-     * @param user The address of the user
-     * @return The nonce for the user
-     */
-    function nonces(address user) public view virtual override(ERC20Permit, Nonces) returns (uint256) {
-        return super.nonces(user);
     }
 
     /**

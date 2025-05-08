@@ -399,17 +399,6 @@ contract vlPUFFERTest is Test {
         vm.stopPrank();
     }
 
-    function test_RevertWhen_createLock_futureLockTimeRequired() public {
-        uint256 amount = 100 ether;
-        uint256 unlockTime = block.timestamp - 1; // Past time
-
-        vm.startPrank(alice);
-        puffer.approve(address(vlPuffer), amount);
-        vm.expectRevert(vlPUFFER.FutureLockTimeRequired.selector);
-        vlPuffer.createLock(amount, unlockTime);
-        vm.stopPrank();
-    }
-
     function test_RevertWhen_createLock_exceedsMaxLockTime() public {
         uint256 amount = 100 ether;
         uint256 unlockTime = block.timestamp + MAX_LOCK_TIME + 2 days; // Exceeds max lock time
