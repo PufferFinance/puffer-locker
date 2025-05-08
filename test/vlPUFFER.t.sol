@@ -548,15 +548,19 @@ contract vlPUFFERTest is Test {
     }
 
     function test_delegation() public {
+        uint256 twoYears = 2 * 365 days;
         uint256 amount = 100 ether;
 
         uint256 originalTime = block.timestamp;
-        uint256 unlockTime = originalTime + 2 * 365 days;
+        uint256 unlockTime = originalTime + twoYears;
 
         vm.startPrank(alice);
         puffer.approve(address(vlPuffer), amount);
         vlPuffer.createLock(amount, unlockTime);
         vm.stopPrank();
+
+        uint256 twoYearVotingPower = 2433333333333333333333;
+        assertEq(vlPuffer.getVotes(alice), twoYearVotingPower, "Alice has the same voting power in vlPUFFER");
 
         vm.startPrank(bob);
         puffer.approve(address(vlPuffer), amount);
@@ -568,33 +572,74 @@ contract vlPUFFERTest is Test {
 
         vlPuffer.getVotes(alice);
 
+        // Alice got her own votes + delegated votes from Bob
         assertEq(vlPuffer.getVotes(alice), 4866666666666666666666, "Bad votes");
         assertEq(vlPuffer.getVotes(bob), 0, "Bad votes");
         assertEq(vlPuffer.getVotes(charlie), 0, "Bad votes");
 
-        vm.warp(block.timestamp + 10 days);
+        uint256 presentTimestamp = block.timestamp + 10 days;
+        // Fast forward 10 days, assume that the last voting snapshot is 8 days ago
+        vm.warp(presentTimestamp);
+
+        assertEq(
+            vlPuffer.getPastVotes(alice, presentTimestamp - 8 days),
+            4866666666666666666666,
+            "Bad votes in the last voting period Alice"
+        );
+        assertEq(vlPuffer.totalSupply(), 4866666666666666666666, "Bad total supply in the last voting period");
 
         address david = makeAddr("David");
         puffer.mint(david, 1000 ether);
 
         vm.startPrank(david);
         puffer.approve(address(vlPuffer), amount);
-        vlPuffer.createLock(amount, unlockTime);
+        vlPuffer.createLock(amount, block.timestamp + twoYears);
         vm.stopPrank();
+
+        assertEq(vlPuffer.getVotes(david), twoYearVotingPower, "David has the same voting power in vlPUFFER");
+
+        uint256 alicePastVotes = vlPuffer.getPastVotes(alice, presentTimestamp - 8 days);
+        assertEq(alicePastVotes, 4866666666666666666666, "Alice has the same voting power in vlPUFFER");
+        assertEq(
+            vlPuffer.getVotes(alice), 4866666666666666666666, "Alice has the same voting power in vlPUFFER in present"
+        );
+        // 3 * twoYearVotingPower
+        uint256 totalSupplyAfter3Locks = 7299999999999999999999;
+        assertEq(vlPuffer.totalSupply(), totalSupplyAfter3Locks, "Total supply is increased for David's vlPUFFER");
 
         vm.startPrank(charlie);
         puffer.approve(address(vlPuffer), amount);
-        vlPuffer.createLock(amount, unlockTime);
+        vlPuffer.createLock(amount, twoYears);
         vlPuffer.delegate(alice);
         vm.stopPrank();
 
-        assertEq(vlPuffer.getVotes(alice), 7266666666666666666666, "Bad votes present");
-        assertEq(vlPuffer.totalSupply(), 9666666666666666666666, "Bad total supply present");
+        // The present values increased
+        assertEq(vlPuffer.getVotes(alice), 7266666628086419753085, "Alice voting power in present increased");
+        assertEq(vlPuffer.totalSupply(), 9699999961419753086418, "Total supply in present is increased");
 
-        uint256 snapshotTime = block.timestamp - (1 weeks + 2 days);
+        // Go in to the future
+        vm.warp(block.timestamp + 100 days);
 
-        assertEq(vlPuffer.getPastVotes(alice, snapshotTime), 4866666666666666666666, "Bad past votes");
-        assertEq(vlPuffer.getPastTotalSupply(snapshotTime), 4866666666666666666666, "Bad past total supply");
+        // Query the old voting power
+        assertEq(
+            vlPuffer.getPastVotes(alice, presentTimestamp - 8 days),
+            alicePastVotes,
+            "Alice has the same voting power in vlPUFFER in the past"
+        );
+
+        // At this time, we only had two locks, so the totalSupply is 2 * 2433333333333333333333
+        assertEq(
+            vlPuffer.getPastTotalSupply(presentTimestamp - 8 days),
+            4866666666666666666666,
+            "Total supply in the past remained"
+        );
+
+        // Here, we had 4 locks (alice, bob, charlie, david)
+        assertEq(
+            vlPuffer.getPastTotalSupply(presentTimestamp),
+            9699999961419753086418,
+            "Total supply in the past after 3 locks"
+        );
     }
 
     function test_reLock_withAdditionalTokens() public {
