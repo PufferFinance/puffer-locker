@@ -61,13 +61,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     event Deposit(address indexed user, uint256 pufferAmount, uint256 unlockTime, uint256 vlPUFFERAmount);
     event Withdraw(address indexed user, uint256 pufferAmount);
     event Supply(uint256 previousSupply, uint256 currentSupply);
-    event ReLockedTokens(
-        address indexed user,
-        uint256 pufferAmount,
-        uint256 pufferAmountAdded,
-        uint256 unlockTime,
-        uint256 vlPUFFERAmount
-    );
+    event ReLockedTokens(address indexed user, uint256 pufferAmount, uint256 unlockTime, uint256 vlPUFFERAmount);
     event UserKicked(address indexed kicker, address indexed user, uint256 vlPUFFERAmount, uint256 kickerFee);
 
     // If a user locks 100 PUFFER tokens for 2 years, they will get 24000 vlPUFFER
@@ -177,13 +171,15 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         // Update the lock information
         lockInfos[msg.sender] = LockInfo({ pufferAmount: amount, unlockTime: roundedUnlockTime });
 
-        // If this is the first mint and the user hasn't delegated yet,
-        // delegate to themselves by default
-        if (delegates(msg.sender) == address(0)) {
-            _delegate(msg.sender, msg.sender);
-        }
+        // delegate the voting power to themselves
+        _delegate(msg.sender, msg.sender);
 
-        emit Deposit({ user: msg.sender, pufferAmount: amount, unlockTime: unlockTime, vlPUFFERAmount: vlPUFFERAmount });
+        emit Deposit({
+            user: msg.sender,
+            pufferAmount: amount,
+            unlockTime: roundedUnlockTime,
+            vlPUFFERAmount: vlPUFFERAmount
+        });
         emit Supply({ previousSupply: supplyBefore, currentSupply: totalSupply() });
     }
 
@@ -231,7 +227,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         //
         // This has been fixed by checking if the new target vlPUFFER amount is greater or
         // less than the current balance. If it's greater, the difference is minted.
-        // If it's less, the difference is burned, ensuring the user's balance
+        // If it's less, the transaction reverts to prevent reduction in the user's voting power
         // correctly reflects the new lock conditions.
         if (newVlPUFFERAmount > currentBalance) {
             _mint(msg.sender, newVlPUFFERAmount - currentBalance);
@@ -246,8 +242,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         emit ReLockedTokens({
             user: msg.sender,
             pufferAmount: pufferAmount,
-            pufferAmountAdded: amount,
-            unlockTime: unlockTime,
+            unlockTime: roundedUnlockTime,
             vlPUFFERAmount: newVlPUFFERAmount
         });
         emit Supply({ previousSupply: supplyBefore, currentSupply: totalSupply() });
@@ -289,6 +284,10 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         for (uint256 i = 0; i < users.length; ++i) {
             address user = users[i];
             LockInfo memory lockInfo = lockInfos[user];
+
+            if (lockInfo.pufferAmount == 0) {
+                continue;
+            }
 
             // The user has a grace period to withdraw their tokens
             require(lockInfo.unlockTime + _GRACE_PERIOD < block.timestamp, TokensMustBeUnlocked());

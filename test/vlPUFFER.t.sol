@@ -266,10 +266,8 @@ contract vlPUFFERTest is Test {
         vm.prank(kicker);
         vlPuffer.kickUsers(users);
 
-        // The same user can be kicked again but this time there are no token transfers
+        // The same user can be 'kicked' again but this time there are no token transfers
         vm.prank(kicker);
-        vm.expectEmit(true, true, true, true);
-        emit vlPUFFER.UserKicked(kicker, alice, 0, 0);
         vlPuffer.kickUsers(users);
     }
 
@@ -467,12 +465,12 @@ contract vlPUFFERTest is Test {
         vm.stopPrank();
     }
 
-    function test_RevertWhen_kickUser_noLock() public {
+    function test_kickUser_noLock() public {
         address[] memory users = new address[](1);
         users[0] = alice;
 
         vm.prank(bob);
-        vm.expectRevert(vlPUFFER.TokensMustBeUnlocked.selector);
+        // Nothing happens, the tx is successful, but it's a no-op
         vlPuffer.kickUsers(users);
     }
 
@@ -717,10 +715,8 @@ contract vlPUFFERTest is Test {
         vm.prank(kicker);
         vlPuffer.kickUsers(users);
 
-        // The same user can be kicked again but this time there are no token transfers
+        // The same user can be 'kicked' again but this time there are no token transfers
         vm.prank(kicker);
-        vm.expectEmit(true, true, true, true);
-        emit vlPUFFER.UserKicked(kicker, alice, 0, 0);
         vlPuffer.kickUsers(users);
     }
 }
