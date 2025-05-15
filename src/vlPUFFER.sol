@@ -71,8 +71,9 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     uint256 internal constant _GRACE_PERIOD = 1 weeks;
     // 1% in basis points
     uint256 internal constant _KICKER_FEE_BPS = 100;
-    // 10000 in basis points
-    uint256 internal constant _KICKER_FEE_DENOMINATOR = 10_000;
+    // 100% in basis points
+    // forgefmt: disable-next-line
+    uint256 internal constant _KICKER_FEE_DENOMINATOR = 100_00;
     // Multiplier for vlPUFFER amount calculation
     uint256 internal constant _LOCK_TIME_MULTIPLIER = 30 days;
     // The minimum amount of PUFFER (PUFFER has 18 decimals, so this is 10 PUFFER) tokens that can be locked to receive vlPUFFER
