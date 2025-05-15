@@ -89,6 +89,17 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     }
 
     /**
+     * @dev notice Permit struct
+     */
+    struct Permit {
+        uint256 deadline;
+        uint256 amount;
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+    }
+
+    /**
      * @notice Mapping of user addresses to their lock information
      * @dev The key is the user address, and the value is a LockInfo struct containing:
      * - pufferAmount: The amount of PUFFER tokens locked
@@ -120,9 +131,6 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
      * @param unlockTime Timestamp (in seconds) when the lock will expire
      */
     function createLock(uint256 amount, uint256 unlockTime) external {
-        // Transfer PUFFER tokens to this contract using SafeERC20
-        PUFFER.safeTransferFrom(msg.sender, address(this), amount);
-
         _createLock(amount, unlockTime);
     }
 
@@ -130,15 +138,18 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
      * @notice Create a new lock with permit, allowing approval and locking in a single transaction
      * @param value Amount of PUFFER tokens to lock
      * @param unlockTime Timestamp (in seconds) when the lock will expire
-     * @param deadline Timestamp until which the signature is valid
-     * @param v Recovery byte of the signature
-     * @param r First 32 bytes of the signature
-     * @param s Second 32 bytes of the signature
+     * @param permitData Permit struct containing the signature
      */
-    function createLockWithPermit(uint256 value, uint256 unlockTime, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
-        external
-    {
-        IERC20Permit(address(PUFFER)).permit(msg.sender, address(this), value, deadline, v, r, s);
+    function createLockWithPermit(uint256 value, uint256 unlockTime, Permit calldata permitData) external {
+        IERC20Permit(address(PUFFER)).permit({
+            owner: msg.sender,
+            spender: address(this),
+            value: permitData.amount,
+            deadline: permitData.deadline,
+            v: permitData.v,
+            s: permitData.s,
+            r: permitData.r
+        });
 
         _createLock(value, unlockTime);
     }
@@ -150,12 +161,15 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     {
         multiplier = ((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER);
         // Round down the unlockTime to the nearest 30-day multiplier
-        roundedUnlockTime = block.timestamp + (multiplier * _LOCK_TIME_MULTIPLIER);
+        roundedUnlockTime = uint256(block.timestamp) + (multiplier * _LOCK_TIME_MULTIPLIER);
     }
 
     function _createLock(uint256 amount, uint256 unlockTime) internal onlyValidLockDuration(unlockTime) whenNotPaused {
         require(amount >= _MIN_LOCK_AMOUNT, InvalidAmount());
         require(lockInfos[msg.sender].pufferAmount == 0, LockAlreadyExists());
+
+        // Transfer PUFFER tokens to this contract using SafeERC20
+        PUFFER.safeTransferFrom(msg.sender, address(this), amount);
 
         (uint256 roundedUnlockTime, uint256 multiplier) = _calculateUnlockTimeAndMultiplier(unlockTime);
 

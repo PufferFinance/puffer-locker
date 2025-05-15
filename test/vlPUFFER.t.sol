@@ -77,11 +77,15 @@ contract vlPUFFERTest is Test {
         vm.startPrank(owner);
         bytes32 digest = puffer.getPermitDigest(owner, address(vlPuffer), amount, 0, deadline);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
-        vlPuffer.createLockWithPermit(amount, unlockTime, deadline, v, r, s);
+
+        vlPUFFER.Permit memory permit = vlPUFFER.Permit({ deadline: deadline, amount: amount, v: v, r: r, s: s });
+
+        vlPuffer.createLockWithPermit(amount, unlockTime, permit);
         vm.stopPrank();
 
         // 100 * 365 / 30 = 1200
         assertEq(vlPuffer.balanceOf(owner), amount * 12, "Bad vlPUFFER balance");
+        assertEq(puffer.balanceOf(address(vlPuffer)), amount, "Bad PUFFER balance in vlPUFFER");
     }
 
     function test_createLockWithPermit_expired() public {
@@ -97,8 +101,11 @@ contract vlPUFFERTest is Test {
         vm.startPrank(owner);
         bytes32 digest = puffer.getPermitDigest(owner, address(vlPuffer), amount, 0, deadline);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+
+        vlPUFFER.Permit memory permit = vlPUFFER.Permit({ deadline: deadline, amount: amount, v: v, r: r, s: s });
+
         vm.expectRevert(abi.encodeWithSignature("ERC2612ExpiredSignature(uint256)", 0));
-        vlPuffer.createLockWithPermit(amount, unlockTime, deadline, v, r, s);
+        vlPuffer.createLockWithPermit(amount, unlockTime, permit);
         vm.stopPrank();
     }
 
@@ -114,6 +121,7 @@ contract vlPUFFERTest is Test {
 
         // Check that alice is delegated to herself by default
         assertEq(vlPuffer.delegates(alice), alice, "Default delegation should be to self");
+        assertEq(puffer.balanceOf(address(vlPuffer)), amount, "Bad PUFFER balance in vlPUFFER");
     }
 
     function test_reLock() public {
@@ -136,6 +144,9 @@ contract vlPUFFERTest is Test {
         // (100 + 50) * 24 = 3600 vlPUFFER
         // that is x24 multiplier
         assertEq(vlPuffer.balanceOf(alice), 3600 ether, "Bad vlPUFFER balance after reLock");
+        assertEq(
+            puffer.balanceOf(address(vlPuffer)), initialAmount + additionalAmount, "Bad PUFFER balance in vlPUFFER"
+        );
     }
 
     function test_reLock_withZeroAmountAndSameUnlockTime() public {
