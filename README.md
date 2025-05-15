@@ -13,7 +13,7 @@ This document explains how the vlPUFFER system works in simple terms. vlPUFFER i
 
 The amount of vlPUFFER (voting power) you receive depends on how long you lock:
 
-| Lock Duration | Approximate Multiplier |
+| Lock Duration | Multiplier |
 |---------------|------------------------|
 | 30 days       | 1x                     |
 | 3 months      | 3x                     |
@@ -23,7 +23,7 @@ The amount of vlPUFFER (voting power) you receive depends on how long you lock:
 | 18 months     | 18x                    |
 | 24 months     | 24x                    |
 
-For example, if you lock 100 PUFFER for 6 months, you'll receive approximately 600 vlPUFFER tokens.
+For example, if you lock 100 PUFFER for 12 months, you'll receive 1200 vlPUFFER tokens.
 
 ## Entry Points (How to Lock)
 
@@ -32,7 +32,7 @@ For example, if you lock 100 PUFFER for 6 months, you'll receive approximately 6
 3. **Re-lock** - You can:
    - Add more PUFFER to your existing lock
    - Extend your lock duration
-   - Both add more tokens and extend the duration
+   - Both add more tokens and extend the duration to get more vlPUFFER tokens
 
 Minimum lock amount: 10 PUFFER
 
@@ -49,7 +49,7 @@ vlPUFFER supports vote delegation, allowing you to:
 
 - Delegate your voting power to another address (including yourself)
 - By default, new locks are automatically self-delegated if you haven't chosen a delegate
-- Delegate using a signature (delegateBySig) without requiring a transaction from the delegating account
+- Delegation is handled by OpenZeppelin's `lib/openzeppelin-contracts/contracts/governance/utils/Votes.sol` contract
 
 ### Multiple Account Strategy
 
@@ -95,7 +95,8 @@ graph TD
 
 ## Important Notes
 
-- You can only withdraw after your lock period ends
+- You can only withdraw after your lock period ends.
+- You can only have one lock at a time.
 - Your vlPUFFER tokens cannot be transferred to other addresses
-- If you don't withdraw within 1 week after lock expiry, anyone can kick you
+- If you don't withdraw within 1 week after lock expiry, anyone can kick you and receive 1% of your PUFFER tokens
 - Re-locking cannot result in less voting power than you currently have
