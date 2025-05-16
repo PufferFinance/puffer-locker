@@ -48,15 +48,14 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
 
     error TransfersDisabled();
     error InvalidAmount();
-    error ExceedsMaxLockTime();
-    error UnlockTimeMustBeGreaterOrEqualThanLock();
+    error InvalidMultiplier();
     error TokensMustBeUnlocked();
     error TokensLocked();
     error InvalidPufferToken();
     error LockAlreadyExists();
-    error LockDurationMustBeAtLeast30Days();
     error LockDoesNotExist();
     error ReLockingWillReduceVLBalance();
+    error NewUnlockTimeMustBeGreaterThanCurrentLock();
 
     event Deposit(address indexed user, uint256 pufferAmount, uint256 unlockTime, uint256 vlPUFFERAmount);
     event Withdraw(address indexed user, uint256 pufferAmount);
@@ -65,8 +64,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     event UserKicked(address indexed kicker, address indexed user, uint256 vlPUFFERAmount, uint256 kickerFee);
 
     // If a user locks 100 PUFFER tokens for 2 years, they will get 24000 vlPUFFER
-    // 1 days is because of the time it takes for transaction to be confirmed on the chain, without it the user wouldn't be able to lock the tokens for 2 years
-    uint256 internal constant _MAX_LOCK_TIME = 2 * 365 days + 1 days;
+    uint256 internal constant _MAX_MULTIPLIER = 24;
     // The user has 1 week to withdraw their tokens after the lock expires, if they don't, they are kicked, and 1% of the PUFFER tokens are sent as a reward to the kicker
     uint256 internal constant _GRACE_PERIOD = 1 weeks;
     // 1% in basis points
@@ -108,11 +106,9 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
      */
     mapping(address user => LockInfo lockInfo) public lockInfos;
 
-    modifier onlyValidLockDuration(uint256 unlockTime) {
-        // The lock duration must be at least 30 days to receive vlPUFFER, because of the rounding in the vlPUFFER calculation
-        // The user would receive 0 vlPUFFER if the lock duration is less than 30 days
-        require(unlockTime - block.timestamp >= _LOCK_TIME_MULTIPLIER, LockDurationMustBeAtLeast30Days());
-        require(unlockTime <= block.timestamp + _MAX_LOCK_TIME, ExceedsMaxLockTime());
+    modifier onlyValidMultiplier(uint256 multiplier) {
+        // Multiplier must be between 1 and 24 (1 month to 2 years)
+        require(multiplier >= 1 && multiplier <= _MAX_MULTIPLIER, InvalidMultiplier());
         _;
     }
 
@@ -126,22 +122,30 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     }
 
     /**
-     * @notice Create a new lock by depositing `amount` tokens until `unlockTime`.
-     * Approval is required for the PUFFER token.
+     * @notice Create a new lock by depositing `amount` tokens with `multiplier`x voting power.
+     * @dev The multiplier determines both the lock duration and voting power:
+     * - 1x = 1 month lock = 1x voting power
+     * - 12x = 12 months lock = 12x voting power
+     * - 24x = 24 months lock = 24x voting power
+     *
+     * Example: If a user locks 100 PUFFER tokens with a 12x multiplier:
+     * - Lock duration: 12 months
+     * - Voting power: 1200 vlPUFFER (100 * 12)
+     *
      * @param amount Amount of PUFFER tokens to lock
-     * @param unlockTime Timestamp (in seconds) when the lock will expire
+     * @param multiplier Voting power multiplier (1-24)
      */
-    function createLock(uint256 amount, uint256 unlockTime) external {
-        _createLock(amount, unlockTime);
+    function createLock(uint256 amount, uint256 multiplier) external {
+        _createLock(amount, multiplier);
     }
 
     /**
      * @notice Create a new lock with permit, allowing approval and locking in a single transaction
      * @param value Amount of PUFFER tokens to lock
-     * @param unlockTime Timestamp (in seconds) when the lock will expire
+     * @param multiplier Voting power multiplier (1-24)
      * @param permitData Permit struct containing the signature
      */
-    function createLockWithPermit(uint256 value, uint256 unlockTime, Permit calldata permitData) external {
+    function createLockWithPermit(uint256 value, uint256 multiplier, Permit calldata permitData) external {
         IERC20Permit(address(PUFFER)).permit({
             owner: msg.sender,
             spender: address(this),
@@ -152,30 +156,22 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
             r: permitData.r
         });
 
-        _createLock(value, unlockTime);
+        _createLock(value, multiplier);
     }
 
-    function _calculateUnlockTimeAndMultiplier(uint256 unlockTime)
-        internal
-        view
-        returns (uint256 roundedUnlockTime, uint256 multiplier)
-    {
-        multiplier = ((unlockTime - block.timestamp) / _LOCK_TIME_MULTIPLIER);
-        // Round down the unlockTime to the nearest 30-day multiplier
-        roundedUnlockTime = uint256(block.timestamp) + (multiplier * _LOCK_TIME_MULTIPLIER);
+    function _calculateUnlockTime(uint256 multiplier) internal view returns (uint256) {
+        // Calculate unlock time based on multiplier (each multiplier unit = 30 days)
+        return uint256(block.timestamp) + (multiplier * _LOCK_TIME_MULTIPLIER);
     }
 
-    function _createLock(uint256 amount, uint256 unlockTime) internal onlyValidLockDuration(unlockTime) whenNotPaused {
+    function _createLock(uint256 amount, uint256 multiplier) internal onlyValidMultiplier(multiplier) whenNotPaused {
         require(amount >= _MIN_LOCK_AMOUNT, InvalidAmount());
         require(lockInfos[msg.sender].pufferAmount == 0, LockAlreadyExists());
 
         // Transfer PUFFER tokens to this contract using SafeERC20
         PUFFER.safeTransferFrom(msg.sender, address(this), amount);
 
-        (uint256 roundedUnlockTime, uint256 multiplier) = _calculateUnlockTimeAndMultiplier(unlockTime);
-
-        // Calculate vlPUFFER amount based on the lock duration
-        // Multiplier is 30 days, if the user locks for 2 years, they should get PUFFER x 24 vlPUFFER
+        uint256 unlockTime = _calculateUnlockTime(multiplier);
         uint256 vlPUFFERAmount = amount * multiplier;
 
         uint256 supplyBefore = totalSupply();
@@ -184,17 +180,12 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         _mint(msg.sender, vlPUFFERAmount);
 
         // Update the lock information
-        lockInfos[msg.sender] = LockInfo({ pufferAmount: amount, unlockTime: roundedUnlockTime });
+        lockInfos[msg.sender] = LockInfo({ pufferAmount: amount, unlockTime: unlockTime });
 
         // delegate the voting power to themselves
         _delegate(msg.sender, msg.sender);
 
-        emit Deposit({
-            user: msg.sender,
-            pufferAmount: amount,
-            unlockTime: roundedUnlockTime,
-            vlPUFFERAmount: vlPUFFERAmount
-        });
+        emit Deposit({ user: msg.sender, pufferAmount: amount, unlockTime: unlockTime, vlPUFFERAmount: vlPUFFERAmount });
         emit Supply({ previousSupply: supplyBefore, currentSupply: totalSupply() });
     }
 
@@ -203,39 +194,35 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
      *
      * The user has 3 options:
      * 1. Deposit more tokens to old lock to receive more vlPUFFER tokens
-     * 2. Extend the lock to a new timestamp without depositing more tokens to receive more vlPUFFER tokens and re-lock the tokens
-     * 3. Deposit more tokens and extend the lock to a new timestamp to receive more vlPUFFER tokens
+     * 2. Extend the lock with a higher multiplier without depositing more tokens
+     * 3. Deposit more tokens and extend the lock with a higher multiplier
      *
      * @param amount Amount of PUFFER tokens to lock
-     * @param unlockTime Timestamp (in seconds) of the new lock expiration
+     * @param multiplier New voting power multiplier (1-24)
      */
-    function reLock(uint256 amount, uint256 unlockTime) external onlyValidLockDuration(unlockTime) whenNotPaused {
-        // Take the tokens only if the amount is greater than 0, that means user is depositing more tokens, if it is 0, that means user is extending the lock
+    function reLock(uint256 amount, uint256 multiplier) external onlyValidMultiplier(multiplier) whenNotPaused {
+        // Take the tokens only if the amount is greater than 0, that means user is depositing more tokens
         if (amount > 0) {
             PUFFER.safeTransferFrom(msg.sender, address(this), amount);
         }
 
         LockInfo memory lockInfo = lockInfos[msg.sender];
-
-        // User may deposit more tokens to old lock, or extend the lock
-        require(unlockTime >= lockInfo.unlockTime, UnlockTimeMustBeGreaterOrEqualThanLock());
         require(lockInfo.pufferAmount > 0, LockDoesNotExist());
 
-        (uint256 roundedUnlockTime, uint256 multiplier) = _calculateUnlockTimeAndMultiplier(unlockTime);
+        // Calculate new unlock time and ensure it's greater than current lock
+        uint256 newUnlockTime = _calculateUnlockTime(multiplier);
+        require(newUnlockTime >= lockInfo.unlockTime, NewUnlockTimeMustBeGreaterThanCurrentLock());
 
-        // the new puffer amount is the sum of the old puffer amount and the new deposit (if any)
         uint256 pufferAmount = lockInfo.pufferAmount + amount;
-
-        // Calculate the new vlPUFFER amount for the re-locked tokens
         uint256 newVlPUFFERAmount = pufferAmount * multiplier;
 
         uint256 currentBalance = balanceOf(msg.sender);
         uint256 supplyBefore = totalSupply();
 
-        // In reLock, the user's new vlPUFFER entitlement is calculated based on the
+        // In reLock, the user's new vlPUFFER is calculated based on the
         // new total PUFFER amount and the time remaining from block.timestamp to the new unlockTime.
         //
-        // Previously, if this new entitlement was less than the user's current vlPUFFER balance
+        // Previously, if this new vlPUFFER was less than the user's current vlPUFFER balance
         // (e.g., they extended the lock for a shorter duration than their previous remaining duration,
         // or didn't add enough PUFFER to compensate for time passed), the logic would attempt
         // to mint a "negative" amount, causing a revert.
@@ -249,15 +236,14 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
         } else if (newVlPUFFERAmount < currentBalance) {
             revert ReLockingWillReduceVLBalance();
         }
-        // If newVlPUFFERAmount == currentBalance, no change to balance is needed.
 
         // Update the lock information
-        lockInfos[msg.sender] = LockInfo({ pufferAmount: pufferAmount, unlockTime: roundedUnlockTime });
+        lockInfos[msg.sender] = LockInfo({ pufferAmount: pufferAmount, unlockTime: newUnlockTime });
 
         emit ReLockedTokens({
             user: msg.sender,
             pufferAmount: pufferAmount,
-            unlockTime: roundedUnlockTime,
+            unlockTime: newUnlockTime,
             vlPUFFERAmount: newVlPUFFERAmount
         });
         emit Supply({ previousSupply: supplyBefore, currentSupply: totalSupply() });
@@ -318,7 +304,6 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
 
             delete lockInfos[user];
 
-            // Burn the vlPUFFER tokens
             _burn(user, vlPUFFERAmount);
 
             // Send the rest of the PUFFER tokens to the user
