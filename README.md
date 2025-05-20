@@ -1,155 +1,103 @@
-# PufferLocker
+# vlPUFFER: Voting & Locking for PUFFER
 
-PufferLocker is a production-grade Solidity contract implementing a token voting system for Puffer tokens, compatible with OpenZeppelin's ERC20Votes. The system enables users to lock Puffer tokens for a specified duration to receive proportional voting power.
+This document explains how the vlPUFFER system works in simple terms. vlPUFFER is a voting system where you lock your PUFFER tokens to gain voting power.
 
-## Core Features
+## How It Works
 
-- **Epoch-Based Voting Power**: Voting power is allocated based on locked token amount × lock duration in weeks
-- **Multiple Locks**: Users can have multiple independent locks with different expiration times
-- **No Decay, Full Expiry**: Voting power remains constant during the lock period and expires completely at the end
-- **Delegation**: Users can delegate their voting power to other addresses, including a specific Puffer team address
-- **Non-transferable**: vlPUFFER tokens represent staked positions and cannot be transferred
-- **History Tracking**: Epoch-based system allows querying historical voting power
-- **Pausable**: Includes standard OpenZeppelin Pausable functionality with emergency withdrawals
-- **Relock Capability**: Users can relock their expired tokens for a new duration without withdrawing
-- **Gasless Approvals**: Supports ERC2612 permit functionality to create locks without requiring separate approval transactions
+- You lock your PUFFER tokens for a period of time (30 days to 2 years)
+- The longer you lock, the more voting power (vlPUFFER tokens) you receive
+- Your vlPUFFER tokens cannot be transferred - they represent your voting power
+- Once your lock period ends, you can withdraw your original PUFFER tokens
 
-## Technical Implementation
+## Multiplier System
 
-- **Lock Mechanism**: Tokens are locked for a user-specified duration (up to 2 years maximum)
-- **Voting Power Calculation**: `votingPower = lockedAmount × lockDurationInWeeks`
-- **vlPUFFER Tokens**: Non-transferable ERC20 tokens representing voting power
-- **Immediate Expiration**: Voting power remains constant throughout the lock period and expires completely at the end
-- **Collateral Integrity**: Original tokens always remain withdrawable after lock expiry
-- **Pagination**: Efficient pagination support for users with many locks
-- **Gas Optimization**: Optimized user tracking and epoch transitions for better gas efficiency
-- **Seamless Relocking**: Expired locks can be renewed without withdrawing and redepositing tokens
-- **Standard Security Controls**: Uses OpenZeppelin's Pausable implementation for emergency control
-- **ERC2612 Support**: Implements permit functionality for gasless lock creation in a single transaction
+The amount of vlPUFFER (voting power) you receive depends on how long you lock:
 
-## Contract Architecture
+| Lock Duration | Multiplier |
+|---------------|------------------------|
+| 30 days       | 1x                     |
+| 3 months      | 3x                     |
+| 6 months      | 6x                     |
+| 9 months      | 9x                     |
+| 12 months     | 12x                    |
+| 18 months     | 18x                    |
+| 24 months     | 24x                    |
 
-### State Management
-- User locks are tracked in mapping `userLocks` with unique identifiers per user
-- Active users are tracked to enable accurate `totalSupply` calculations
-- Weekly epochs allow point-in-time queries through `balanceOfAtEpoch` and `totalSupplyAtEpoch`
-- Two balance views: active (unexpired) and raw (total including expired)
+For example, if you lock 100 PUFFER for 12 months, you'll receive 1200 vlPUFFER tokens.
 
-### Key Functions
+## Entry Points (How to Lock)
 
-```solidity
-// Create a new lock
-function createLock(uint256 _value, uint256 _unlockTime) external returns (uint256 lockId);
+1. **Create a new lock** - Lock your PUFFER tokens for the first time
+2. **Create a lock with permit** - Lock your tokens in a single transaction
+3. **Re-lock** - You can:
+   - Add more PUFFER to your existing lock
+   - Extend your lock duration
+   - Both add more tokens and extend the duration to get more vlPUFFER tokens
 
-// Create a new lock using permit functionality (no separate approval needed)
-function createLockWithPermit(uint256 _value, uint256 _unlockTime, uint256 _deadline, uint8 v, bytes32 r, bytes32 s) external returns (uint256 lockId);
+Minimum lock amount: 10 PUFFER
 
-// Withdraw tokens from an expired lock
-function withdraw(uint256 _lockId) external;
+## Exit Points (How to Unlock)
 
-// Relock tokens from an expired lock for a new duration
-function relockExpiredLock(uint256 _lockId, uint256 _unlockTime) external returns (bool);
+1. **Withdraw** - Once your lock expires, you can withdraw your PUFFER tokens
+2. **Get kicked** - If you don't withdraw within 1 week after expiry, anyone can "kick" you:
+   - The kicker receives 1% of your PUFFER tokens
+   - The remaining 99% are returned to you automatically
 
-// Delegate voting power to the Puffer team
-function delegateToPufferTeam() external;
+## Vote Delegation
 
-// Get active (unexpired) voting power
-function balanceOf(address account) public view returns (uint256);
+vlPUFFER supports vote delegation, allowing you to:
 
-// Get raw vlToken balance (including expired tokens)
-function getRawBalance(address account) external view returns (uint256);
+- Delegate your voting power to another address (including yourself)
+- By default, new locks are automatically self-delegated if you haven't chosen a delegate
+- Delegation is handled by OpenZeppelin's `lib/openzeppelin-contracts/contracts/governance/utils/Votes.sol` contract
 
-// View voting power at a specific epoch
-function balanceOfAtEpoch(address account, uint256 _epoch) public view returns (uint256);
+### Multiple Account Strategy
 
-// Pause the contract in emergency situations
-function pause() external;
+You can optimize your locking strategy using multiple accounts:
 
-// Unpause the contract
-function unpause() external;
+1. Create different locks with different durations from separate accounts
+   - For example: 3 months in one account, 12 months in another, 24 months in a third
+2. Delegate the voting power from all these accounts to your main account
+3. This gives you flexibility to have different unlock schedules while concentrating voting power
+
+## Interaction Flow
+
+```mermaid
+graph TD
+    User([User]) --> Lock["Create Lock"]
+    User --> LockPermit["Create Lock with Permit"]
+    User --> Relock["Re-lock (extend/add)"]
+    
+    Lock --> vlPUFFER[("vlPUFFER (Voting Power)")]
+    LockPermit --> vlPUFFER
+    Relock --> vlPUFFER
+    
+    vlPUFFER --> |"Lock expires"| Withdraw["Withdraw PUFFER"]
+    vlPUFFER --> |"Lock expires + 1 week"| Kick["Get Kicked"]
+    vlPUFFER --> Delegate["Delegate Votes"]
+    
+    Withdraw --> PUFFER[("PUFFER Tokens")]
+    Kick --> |"99%"| PUFFER
+    Kick --> |"1%"| KickerFee["Kicker Fee"]
+    
+    Account1([Account 1]) --> Lock1["Lock (3 months)"]
+    Account2([Account 2]) --> Lock2["Lock (12 months)"]
+    Account3([Account 3]) --> Lock3["Lock (24 months)"]
+    
+    Lock1 --> vlPUFFER1["vlPUFFER"]
+    Lock2 --> vlPUFFER2["vlPUFFER"]
+    Lock3 --> vlPUFFER3["vlPUFFER"]
+    
+    vlPUFFER1 --> |"Delegate"| MainAccount["Main Account (Combined Voting Power)"]
+    vlPUFFER2 --> |"Delegate"| MainAccount
+    vlPUFFER3 --> |"Delegate"| MainAccount
 ```
 
-## Deployment
+## Important Notes
 
-The contract can be deployed to both testnet and mainnet environments using Foundry scripts.
-
-### Prerequisites
-
-- Foundry installed (https://getfoundry.sh/)
-- Ethereum RPC endpoints for Holesky testnet and/or Mainnet
-- Private key for deployment
-- Etherscan API key for verification
-
-### Deployment Commands
-
-#### Holesky Testnet Deployment
-
-```bash
-forge script script/Deploy.s.sol:DeployPufferLocker \
-  --rpc-url $HOLESKY_RPC_URL \
-  --private-key $PRIVATE_KEY \
-  --broadcast \
-  --verify \
-  --etherscan-api-key $ETHERSCAN_API_KEY \
-  -vvvv
-```
-
-#### Mainnet Deployment
-
-```bash
-forge script script/Deploy.s.sol:DeployPufferLocker \
-  --rpc-url $MAINNET_RPC_URL \
-  --private-key $PRIVATE_KEY \
-  --broadcast \
-  --verify \
-  --etherscan-api-key $ETHERSCAN_API_KEY \
-  -vvvv
-```
-
-#### Custom Parameter Deployment
-
-For deploying with custom token and team addresses:
-
-```bash
-forge script script/Deploy.s.sol:DeployPufferLockerWithCustomParams \
-  --sig "run(address)" $PUFFER_TEAM_ADDRESS \
-  --rpc-url $RPC_URL \
-  --private-key $PRIVATE_KEY \
-  --broadcast \
-  --verify \
-  --etherscan-api-key $ETHERSCAN_API_KEY \
-  -vvvv
-```
-
-## Development and Testing
-
-Contract is built using Foundry. To use:
-
-```bash
-# Install dependencies
-forge install
-
-# Run tests
-forge test
-
-# Run attack vector tests
-forge test --match-test "test_Lock|test_Epoch|test_Mass"
-
-# Build
-forge build
-```
-
-## Security Considerations
-
-The contract has been tested against several potential attack vectors:
-
-1. **Lock Spam Attack**: Creating numerous small locks to bloat contract storage
-2. **Epoch Processing Attack**: Exploiting epoch transitions after periods of inactivity
-3. **Mass Withdrawal Attack**: Gas limitations with multiple withdrawals
-
-All tests confirm the contract's resilience to these attack vectors.
-
-## License
-
-Licensed under MIT
-
+- You can only withdraw after your lock period ends.
+- You can only have one lock at a time.
+- Your vlPUFFER tokens cannot be transferred to other addresses
+- If you don't withdraw within 1 week after lock expiry, anyone can kick you and receive 1% of your PUFFER tokens
+- Re-locking cannot result in less voting power than you currently have
+- When re-locking, the new lock duration must be longer than your current lock

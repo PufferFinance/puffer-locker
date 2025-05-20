@@ -3,6 +3,12 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
+solc = "0.8.30"
+evm_version = "prague" # pectra 
+optimizer = true
+optimizer_runs = 200
+extra_output = ["storageLayout"]
+
 [fmt]
 line_length = 120
 int_types = "long"
@@ -10,10 +16,11 @@ tab_width = 4
 quote_style = "double"
 bracket_spacing = true
 sort_imports = true
+number_underscore = "thousands"
 
-remappings = [
-    "@openzeppelin/contracts/=lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/"
-]
+remappings = [  
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"  
+]  
 
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
