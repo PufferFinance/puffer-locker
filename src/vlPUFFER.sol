@@ -63,7 +63,7 @@ contract vlPUFFER is ERC20, ERC20Votes, Ownable2Step, Pausable {
     event ReLockedTokens(address indexed user, uint256 pufferAmount, uint256 unlockTime, uint256 vlPUFFERAmount);
     event UserKicked(address indexed kicker, address indexed user, uint256 vlPUFFERAmount, uint256 kickerFee);
 
-    // If a user locks 100 PUFFER tokens for 2 years, they will get 24000 vlPUFFER
+    // If a user locks 100 PUFFER tokens for 2 years, they will get 2400 vlPUFFER
     uint256 internal constant _MAX_MULTIPLIER = 24;
     // The user has 1 week to withdraw their tokens after the lock expires, if they don't, they are kicked, and 1% of the PUFFER tokens are sent as a reward to the kicker
     uint256 internal constant _GRACE_PERIOD = 1 weeks;
