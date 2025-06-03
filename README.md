@@ -101,3 +101,7 @@ graph TD
 - If you don't withdraw within 1 week after lock expiry, anyone can kick you and receive 1% of your PUFFER tokens
 - Re-locking cannot result in less voting power than you currently have
 - When re-locking, the new lock duration must be longer than your current lock
+
+## Security
+[BlockSec - vlPUFFER](./BlockSec%20-%20vlPUFFER.pdf)
+
