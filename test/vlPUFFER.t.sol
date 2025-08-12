@@ -730,24 +730,24 @@ contract vlPUFFERTest is Test {
         vm.startPrank(alice);
         puffer.approve(address(vlPuffer), type(uint256).max);
         vlPuffer.createLock(initialAmount, initialMultiplier);
-        
+
         uint256 initialVlPufferBalance = vlPuffer.balanceOf(alice);
         assertEq(initialVlPufferBalance, 100 ether, "Initial vlPUFFER balance should be 100 ether");
-        
+
         // Fast forward past the lock expiry (1 month + 1 day)
         vm.warp(block.timestamp + (initialMultiplier * LOCK_TIME_MULTIPLIER) + 1 days);
-        
+
         // Now try to relock with additional tokens and higher multiplier
         uint256 additionalAmount = 50 ether;
         uint256 newMultiplier = 3; // 3 months
-        
+
         vlPuffer.reLock(additionalAmount, newMultiplier);
         vm.stopPrank();
-        
+
         // Should have (100 + 50) * 3 = 450 vlPUFFER
         assertEq(vlPuffer.balanceOf(alice), 450 ether, "vlPUFFER balance should be 450 ether after relock");
         assertEq(puffer.balanceOf(address(vlPuffer)), 150 ether, "PUFFER balance should be 150 ether");
-        
+
         // Check the new unlock time
         (, uint256 newUnlockTime) = vlPuffer.lockInfos(alice);
         uint256 expectedUnlockTime = block.timestamp + (newMultiplier * LOCK_TIME_MULTIPLIER);
@@ -761,20 +761,20 @@ contract vlPUFFERTest is Test {
         vm.startPrank(alice);
         puffer.approve(address(vlPuffer), type(uint256).max);
         vlPuffer.createLock(initialAmount, initialMultiplier);
-        
+
         // Fast forward past the lock expiry (1 month + 1 day)
         vm.warp(block.timestamp + (initialMultiplier * LOCK_TIME_MULTIPLIER) + 1 days);
-        
+
         // Now try to relock with zero additional tokens but higher multiplier
         uint256 newMultiplier = 3; // 3 months
-        
+
         vlPuffer.reLock(0, newMultiplier);
         vm.stopPrank();
-        
+
         // Should have 100 * 3 = 300 vlPUFFER
         assertEq(vlPuffer.balanceOf(alice), 300 ether, "vlPUFFER balance should be 300 ether after relock");
         assertEq(puffer.balanceOf(address(vlPuffer)), 100 ether, "PUFFER balance should remain 100 ether");
-        
+
         // Check the new unlock time
         (, uint256 newUnlockTime) = vlPuffer.lockInfos(alice);
         uint256 expectedUnlockTime = block.timestamp + (newMultiplier * LOCK_TIME_MULTIPLIER);
